@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: tests (py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # setup-python cannot install 3.8/3.9 on ubuntu-24.04 runners,
+          # so the oldest supported versions pin the 22.04 image.
+          - { python: "3.8", os: ubuntu-22.04 }
+          - { python: "3.9", os: ubuntu-22.04 }
+          - { python: "3.11", os: ubuntu-latest }
+          - { python: "3.13", os: ubuntu-latest }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      # Standard library only: no pip install step, by design.
+      - name: Run the test suite
+        run: python -m unittest discover -s tests -t .
+
+      - name: Bundle is in sync with the package
+        run: python tools/bundle.py --check
+
+      - name: Demo programs run end to end
+        run: |
+          python -m trapcpu run programs/trap/oracle_hello.asm --oracle echo
+          python -m trapcpu run programs/trap/oracle_guess.asm --oracle bisect --seed 4
+          python -m trapcpu run programs/trap/oracle_ecc.asm --oracle noisy --seed 1

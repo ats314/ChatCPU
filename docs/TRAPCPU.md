@@ -328,6 +328,9 @@ Ran 262 tests in 2.4s
 OK
 ```
 
+CI runs the suite, the bundle sync check, and the demo programs on Python
+3.8 / 3.9 / 3.11 / 3.13 (`.github/workflows/ci.yml`).
+
 ---
 
 ## Instruction set

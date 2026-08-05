@@ -1,5 +1,7 @@
 # ChatCPU
 
+[![CI](https://github.com/ats314/ChatCPU/actions/workflows/ci.yml/badge.svg)](https://github.com/ats314/ChatCPU/actions/workflows/ci.yml)
+
 **ChatCPU is a homemade 16 bit computer built entirely in Python and designed to run inside ChatGPT's Python code runner**
 
 > ⚠️ **Very early access / proof of concept**
