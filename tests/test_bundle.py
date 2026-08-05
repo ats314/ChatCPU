@@ -23,7 +23,8 @@ class TestBundle(unittest.TestCase):
         with open(BUNDLE, encoding="utf-8") as handle:
             source = handle.read()
 
-        allowed = {"argparse", "io", "os", "random", "re", "sys", "collections"}
+        allowed = {"argparse", "collections", "io", "json", "os", "random", "re",
+                   "sys", "time", "urllib"}
         for lineno, line in enumerate(source.split("\n"), start=1):
             stripped = line.strip()
             if not stripped.startswith(("import ", "from ")):

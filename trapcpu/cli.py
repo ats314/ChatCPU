@@ -22,6 +22,7 @@ import argparse
 import sys
 
 from .assembler import AssemblyError, assemble_file
+from .llm import ClaudeOracle, OracleTransportError
 from .isa import MNEMONICS, OPS
 from .machine import Machine, State
 from .oracle import (
@@ -43,6 +44,8 @@ echo      deterministic; answers from a [hint: ...] marker in the prompt
 bisect    plays higher/lower against oracle_guess.asm
 noisy[:R] unreliable memory: perturbs each replica with probability R
 manual    print the frame, read the reply from stdin (the real thing)
+claude[:MODEL]  a real Claude model over the Anthropic API (needs
+          ANTHROPIC_API_KEY; default model claude-opus-5)
 script:F  replay answers from file F, one per line
 none      never answers; every trap completes with RETRIES\
 """
@@ -73,6 +76,12 @@ def build_oracle(spec, faults=(), seed=None):
         inner = NoisyOracle(rate=rate, rng=random.Random(seed))
     elif spec == "manual":
         inner = ManualOracle()
+    elif spec == "claude" or spec.startswith("claude:"):
+        model = spec.split(":", 1)[1] if ":" in spec else None
+        try:
+            inner = ClaudeOracle(**({"model": model} if model else {}))
+        except OracleTransportError as error:
+            raise SystemExit(str(error))
     elif spec == "none":
         inner = _NullOracle()
     else:

@@ -45,11 +45,31 @@ CPU picks a secret, assembles a fresh prompt in guest RAM each round out of
 string fragments and a rendered decimal, and executes `TRAP`. The opponent's
 move arrives as a validated integer in `D`.
 
-To put a real model in the loop, use `--oracle manual` and paste:
+To put a real model in the loop, either paste frames by hand or attach the
+API backend (standard library only — raw HTTPS, no SDK, in keeping with the
+paste-into-a-sandbox premise):
 
 ```console
 $ python3 -m trapcpu run programs/trap/oracle_hello.asm --oracle manual
+$ ANTHROPIC_API_KEY=... python3 -m trapcpu run programs/trap/oracle_quiz.asm \
+      --oracle claude --stats          # or claude:MODEL_ID
 ```
+
+`ClaudeOracle` sends the rendered frame as the user message, verbatim, and
+returns whatever text comes back — the model speaks the protocol, not the
+transport. A safety-classifier decline (`stop_reason: "refusal"`) is rendered
+as a protocol-level `STATUS: REFUSED` frame, which is the same statement at a
+different layer. `independent_replicas=True` makes one API call per replica so
+the L4 vote gets genuinely independent samples.
+
+**It has been run against a real model.** A frontier model played both demo
+programs live over `frame`/`resume` — five protocol conditions and a full game
+of higher-or-lower, with the machine serialized to text between every
+exchange. 5/5 quiz traps succeeded on the first attempt; the DEGRADED/OK
+split, the STRICT_CRC tool-use hypothesis, and the hardware verification of
+the oracle's arithmetic all behaved exactly as specified. The honest record,
+including the one place a tool was used, is in
+[`docs/LIVE_RUN.md`](LIVE_RUN.md).
 
 ---
 
@@ -257,7 +277,7 @@ For pasting into a sandbox that has no package manager:
 
 ```console
 $ python3 tools/bundle.py
-wrote bootstrap.py (142350 bytes)
+wrote bootstrap.py (153553 bytes)
 ```
 
 `bootstrap.py` is the whole system flattened into one standard-library-only
@@ -285,7 +305,8 @@ trapcpu/
   assembler.py    two pass assembler: DATA section, .INCLUDE, expressions
   protocol.py     the wire format and the validation ladder
   machine.py      CPU, trap suspend/resume, retry semantics, statistics
-  oracle.py       backends: manual, callback, scripted, echo, bisect, faults
+  oracle.py       backends: manual, callback, scripted, echo, bisect, noisy, faults
+  llm.py          ClaudeOracle: a real model over the Messages API (stdlib HTTP)
   snapshot.py     transcript as disk, sector CRCs, bit rot measurement
   cli.py          run / frame / resume / asm / mount / isa / oracles
 programs/trap/
@@ -295,14 +316,15 @@ programs/trap/
   oracle_num.asm      intelligence as an ALU operand
   oracle_ecc.asm      replica voting and repair counting
   oracle_guess.asm    a game whose second player is an opcode
+  oracle_quiz.asm     five traps, one per protocol condition (the live-run script)
 docs/TRAP_PROTOCOL.md   the specification
 tools/bundle.py         builds bootstrap.py
-tests/                  242 tests, standard library unittest
+tests/                  262 tests, standard library unittest
 ```
 
 ```console
 $ python3 -m unittest discover -s tests -t .
-Ran 242 tests in 0.63s
+Ran 262 tests in 2.4s
 OK
 ```
 
