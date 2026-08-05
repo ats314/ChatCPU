@@ -416,6 +416,19 @@ def build_parser():
     add_machine_flags(mnt)
     mnt.set_defaults(handler=cmd_mount)
 
+    abl = sub.add_parser("ablate",
+                         help="which oracle calls mattered, and did the "
+                              "model beat noise")
+    abl.add_argument("program")
+    abl.add_argument("--oracle", default="judge",
+                     help="oracle backend to ablate (default: judge)")
+    abl.add_argument("--trials", type=int, default=20,
+                     help="random trials per measurement (default: 20)")
+    abl.add_argument("--seed", type=int, default=0)
+    abl.add_argument("--prompts", action="store_true",
+                     help="show the prompt behind each call")
+    abl.set_defaults(handler=cmd_ablate)
+
     isa = sub.add_parser("isa", help="print the instruction set")
     isa.set_defaults(handler=cmd_isa)
 
@@ -423,6 +436,14 @@ def build_parser():
     oracles.set_defaults(handler=cmd_oracles)
 
     return parser
+
+
+def cmd_ablate(args, out):
+    from .ablate import report
+    report(args.program, lambda: build_oracle(args.oracle),
+           trials=args.trials, seed=args.seed, out=out,
+           show_prompts=args.prompts)
+    return 0
 
 
 def _faults(text):
