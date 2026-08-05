@@ -283,3 +283,49 @@ class TestTracingOracle(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestNavigatorOracle(unittest.TestCase):
+
+    def _ask(self, prompt):
+        request = frame(mode=Mode.NUM, prompt=prompt)
+        from trapcpu.oracle import NavigatorOracle
+        return validate(NavigatorOracle().ask(request), request).value
+
+    def test_it_steers_toward_the_target(self):
+        # ship left of and below target: closes the larger (x) gap first -> right (4)
+        self.assertEqual(self._ask("ship at (2,2). target at (8,5)."), 4)
+
+    def test_it_closes_the_vertical_gap_when_larger(self):
+        self.assertEqual(self._ask("ship at (5,1). target at (6,9)."), 2)  # down
+
+    def test_it_moves_left_and_up_when_past_the_target(self):
+        self.assertEqual(self._ask("ship at (9,9). target at (1,1)."), 3)  # left
+
+    def test_a_prompt_without_coordinates_is_refused(self):
+        request = frame(mode=Mode.NUM, prompt="no coordinates here")
+        from trapcpu.oracle import NavigatorOracle
+        self.assertEqual(
+            validate(NavigatorOracle().ask(request), request).status,
+            Status.REFUSED,
+        )
+
+
+class TestMuxOracle(unittest.TestCase):
+
+    def test_frames_route_by_device_number(self):
+        from trapcpu.oracle import MuxOracle
+        fast = ScriptedOracle(["FAST"], checksum="crc", loop=True)
+        slow = ScriptedOracle(["SLOW"], checksum="crc", loop=True)
+        mux = MuxOracle({0: fast, 1: slow})
+
+        f0 = frame(); f0.device = 0
+        f1 = frame(); f1.device = 1
+        self.assertEqual(validate(mux.ask(f0), f0).payload, b"FAST")
+        self.assertEqual(validate(mux.ask(f1), f1).payload, b"SLOW")
+
+    def test_an_empty_device_slot_never_answers(self):
+        from trapcpu.oracle import MuxOracle
+        mux = MuxOracle({0: EchoOracle()})
+        f = frame(); f.device = 3
+        self.assertIsNone(mux.ask(f))   # -> the machine completes with RETRIES

@@ -85,6 +85,10 @@ class Status:
     BUDGET = 0x22          # oracle call budget exhausted
     ABORT = 0x23           # host aborted the trap
 
+    BUSY = 0x24            # TRAP/TRAPA while an async request is in flight
+    WX = 0x25              # writeback denied: response buffer overlaps an
+                           # executable page (the IOMMU rule)
+
 
 STATUS_NAMES = {
     value: name
@@ -244,7 +248,8 @@ class TrapFrame:
 
     def __init__(self, nonce, prompt, mode=Mode.TEXT, replicas=1, capacity=64,
                  attempt=1, retries=0, flags=0, registers=None, cycle=0,
-                 descriptor=0, last_status=None, last_detail=None):
+                 descriptor=0, last_status=None, last_detail=None,
+                 channel="SYNC", device=0):
         self.nonce = nonce & 0xFFFF
         self.prompt = prompt
         self.mode = mode
@@ -258,6 +263,8 @@ class TrapFrame:
         self.descriptor = descriptor
         self.last_status = last_status
         self.last_detail = last_detail
+        self.channel = channel
+        self.device = device
 
     @property
     def nonce_text(self):
@@ -277,6 +284,10 @@ class TrapFrame:
         lines.append(f"MAXLEN: {self.capacity}")
         lines.append(f"CYCLE: {self.cycle}")
         lines.append(f"DESC: {self.descriptor:04X}")
+        if self.channel != "SYNC":
+            lines.append(f"CHANNEL: {self.channel}")
+        if self.device:
+            lines.append(f"DEVICE: {self.device}")
 
         if self.registers:
             lines.append("REGS: " + " ".join(
