@@ -36,6 +36,23 @@
 > oracle guesses 21 -> correct!
 > ```
 
+> ### 📏 See also: [CTXPROBE](docs/CTXPROBE.md)
+>
+> TRAPCPU's persistence layer discovered that an attention window is a storage
+> medium that loses data *silently*. **ctxprobe** is that discovery extracted
+> into a standalone instrument — badblocks for transcripts. Emit CRC'd
+> sentinel probes into any long-running conversation; scan whatever survives
+> compaction; get a sector-level report of what was evicted, corrupted, or
+> rewritten-with-a-fixed-checksum, as a curve over context depth.
+>
+> ```console
+> $ python3 -m ctxprobe demo --seed 7
+> CTXPROBE SCAN: 2 probe(s), 1 vanished, 24 sector(s): 17 ok, 1 rewritten, 2 corrupted, 4 evicted
+> ```
+>
+> It lives in [`ctxprobe/`](ctxprobe/) — standard library only, no dependency
+> on the CPU.
+
 ChatCPU contains a custom CPU, RAM, ROM, assembler, shell, persistent filesystem and memory mapped I/O.
 
 It does **not** require external packages or a server. The project is specifically designed around the sandboxed Python environment available in ChatGPT.
