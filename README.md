@@ -4,6 +4,34 @@
 
 > ⚠️ **Very early access / proof of concept**
 
+> ### 🔌 See also: [TRAPCPU](docs/TRAPCPU.md)
+>
+> ChatCPU built a computer inside the model's sandbox. **TRAPCPU** inverts the
+> relationship: it puts the model *on the motherboard*, as a memory mapped
+> coprocessor at I/O port `0x30`. A program writes a request descriptor there
+> and executes `TRAP`; the machine halts, publishes its state into the
+> conversation, and the model's next reply is the hardware response — parsed,
+> checksummed, voted on, and written into RAM before the next instruction runs.
+>
+> ```asm
+> LDIA REQ        ; descriptor address
+> OUTP 0x30       ; latch it into the oracle controller
+> TRAP            ; the machine stops here
+> ```
+>
+> It lives in [`trapcpu/`](trapcpu/) alongside the original and reuses the base
+> ISA unchanged. The wire format is specified in
+> [`docs/TRAP_PROTOCOL.md`](docs/TRAP_PROTOCOL.md).
+>
+> ```console
+> $ python3 -m trapcpu run programs/trap/oracle_guess.asm --oracle bisect --seed 4
+> oracle guesses 50 -> too high
+> oracle guesses 25 -> too high
+> oracle guesses 12 -> too low
+> oracle guesses 18 -> too low
+> oracle guesses 21 -> correct!
+> ```
+
 ChatCPU contains a custom CPU, RAM, ROM, assembler, shell, persistent filesystem and memory mapped I/O.
 
 It does **not** require external packages or a server. The project is specifically designed around the sandboxed Python environment available in ChatGPT.
