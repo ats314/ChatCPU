@@ -38,6 +38,7 @@ jobs:
           python -m trapcpu run programs/trap/oracle_hello.asm --oracle echo
           python -m trapcpu run programs/trap/oracle_guess.asm --oracle bisect --seed 4
           python -m trapcpu run programs/trap/oracle_ecc.asm --oracle noisy --seed 1
+          python -m trapcpu run programs/trap/oracle_sort.asm --oracle judge
 
       # Keeps docs/LIVE_JIT.md honest: every task stays solvable inside the
       # safe subset, and the escape detector stays able to detect an escape.

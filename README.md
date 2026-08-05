@@ -8,10 +8,35 @@
 
 > ### 🔌 See also: [TRAPCPU](docs/TRAPCPU.md)
 >
-> ChatCPU built a computer inside the model's sandbox. **TRAPCPU** inverts the
-> relationship: it puts the model *on the motherboard*, as a memory mapped
-> coprocessor at I/O port `0x30`. A program writes a request descriptor there
-> and executes `TRAP`; the machine halts, publishes its state into the
+> ChatCPU hides a computer inside the model's sandbox. **TRAPCPU** turns that
+> around and makes the model *a part of the computer* — a chip on the
+> motherboard that programs can call, the way an old CPU called a maths
+> coprocessor.
+>
+> Here is what that buys you. This is bubble sort — the most ordinary,
+> most deterministic routine in computing — except that where it would normally
+> compare two numbers, it stops the whole machine and asks:
+>
+> ```console
+> $ python3 -m trapcpu run programs/trap/oracle_sort.asm --oracle judge
+> before:                     after:
+>   a house fire                a paper cut
+>   a paper cut                 a wasp sting
+>   a hurricane                 a car crash
+>   a wasp sting                a house fire
+>   a car crash                 a hurricane
+>
+> sorted in 16 oracle comparisons
+> ```
+>
+> Nothing in that assembly knows a hurricane outranks a paper cut. It shuffles
+> 16-bit words and asks the device which way round each pair goes. Flip the
+> device's opinion and the same unmodified program sorts backwards — that is a
+> [test](tests/test_sort.py), not a claim. The sort is provably correct; the
+> *ordering relation* is judgement.
+>
+> Mechanically: a program writes a request descriptor to I/O port `0x30` and
+> executes `TRAP`. The machine halts, publishes its state into the
 > conversation, and the model's next reply is the hardware response — parsed,
 > checksummed, voted on, and written into RAM before the next instruction runs.
 >
@@ -27,14 +52,9 @@
 > and a verify-then-bless pipeline let the CPU run safely. The wire format is
 > specified in [`docs/TRAP_PROTOCOL.md`](docs/TRAP_PROTOCOL.md).
 >
-> ```console
-> $ python3 -m trapcpu run programs/trap/oracle_guess.asm --oracle bisect --seed 4
-> oracle guesses 50 -> too high
-> oracle guesses 25 -> too high
-> oracle guesses 12 -> too low
-> oracle guesses 18 -> too low
-> oracle guesses 21 -> correct!
-> ```
+> Swap `--oracle judge` (a hardcoded stand-in, so it runs with no API key) for
+> `--oracle claude` and the ordering is decided for real, one question at a
+> time. `--oracle manual` prints each question and lets you answer it yourself.
 
 ChatCPU contains a custom CPU, RAM, ROM, assembler, shell, persistent filesystem and memory mapped I/O.
 
