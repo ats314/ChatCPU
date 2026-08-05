@@ -29,6 +29,7 @@ from .oracle import (
     ALL_FAULTS,
     BisectOracle,
     EchoOracle,
+    JudgeOracle,
     FaultInjector,
     ManualOracle,
     MuxOracle,
@@ -44,6 +45,7 @@ from .snapshot import SnapshotError, dump, mount
 ORACLE_HELP = """\
 echo      deterministic; answers from a [hint: ...] marker in the prompt
 bisect    plays higher/lower against oracle_guess.asm
+judge     one hardcoded opinion, so oracle_sort.asm runs with no API key
 navigator steers the async pilot demo toward its target
 noisy[:R] unreliable memory: perturbs each replica with probability R
 manual    print the frame, read the reply from stdin (the real thing)
@@ -82,6 +84,8 @@ def build_oracle(spec, faults=(), seed=None):
         inner = EchoOracle()
     elif spec == "bisect":
         inner = BisectOracle()
+    elif spec == "judge":
+        inner = JudgeOracle()
     elif spec == "navigator":
         inner = NavigatorOracle()
     elif spec == "noisy" or spec.startswith("noisy:"):

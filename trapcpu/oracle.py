@@ -297,6 +297,56 @@ class BisectOracle(Oracle):
         )
 
 
+class JudgeOracle(Oracle):
+    """Answers "which of these two is worse?" so oracle_sort.asm runs offline.
+
+    ``oracle_sort.asm`` uses the coprocessor as its comparison operator, which
+    means the demo needs an opponent that holds a consistent opinion across
+    every pair the sort happens to present - a fixed script cannot do that,
+    because which comparisons get made depends on the answers to earlier ones.
+
+    This backend has exactly one hardcoded opinion, listed below. That is the
+    honest description of it: it is a stand-in that makes the program runnable
+    with no API key and keeps CI deterministic. It is not a judge. Run with
+    ``--oracle claude`` for an ordering that is actually decided rather than
+    looked up.
+    """
+
+    name = "judge"
+
+    # Severity ranks for the items oracle_sort.asm ships with. Higher is worse.
+    _OPINION = {
+        "a paper cut": 1,
+        "a wasp sting": 2,
+        "a car crash": 3,
+        "a house fire": 4,
+        "a hurricane": 5,
+    }
+
+    _PAIR = re.compile(r"^\s*1\)\s*(.+?)\s*^\s*2\)\s*(.+?)\s*\Z",
+                       re.M | re.S)
+
+    def rank(self, item):
+        key = item.strip().lower()
+        if key in self._OPINION:
+            return self._OPINION[key]
+        # Unknown item: fall back to something stable so the sort still
+        # terminates with a total order, rather than looking clever about it.
+        return 100 + sum(bytearray(key.encode("utf-8"))) % 100
+
+    def ask(self, frame):
+        match = self._PAIR.search(frame.prompt)
+        if match is None:
+            answer = "1"
+        else:
+            left, right = match.group(1), match.group(2)
+            answer = "1" if self.rank(left) > self.rank(right) else "2"
+        return render_reply(
+            frame.nonce, [answer] * frame.replicas,
+            checksum="crc", replicas=frame.replicas,
+        )
+
+
 class NavigatorOracle(Oracle):
     """Steers toward a target by reading coordinates out of the prompt.
 
