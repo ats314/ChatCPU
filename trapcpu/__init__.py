@@ -55,15 +55,18 @@ from .protocol import (
     status_name,
     validate,
 )
+from .llm import ClaudeOracle, OracleTransportError
 from .snapshot import MountReport, SnapshotError, dump, mount
 
 __version__ = "1.0.0"
 
 __all__ = [
-    "ALL_FAULTS", "AssemblyError", "CallbackOracle", "DESCRIPTOR_SIZE",
+    "ALL_FAULTS", "AssemblyError", "CallbackOracle", "ClaudeOracle",
+    "DESCRIPTOR_SIZE",
     "EchoOracle", "Fault", "FaultInjector", "Flag", "Machine", "MachineError",
     "ManualOracle", "Mode", "MountReport", "OPS", "Oracle", "OracleExhausted",
-    "OracleResult", "OracleStats", "PORT_ORACLE", "PORT_ORACLE_STAT",
+    "OracleResult", "OracleStats", "OracleTransportError", "PORT_ORACLE",
+    "PORT_ORACLE_STAT",
     "PROTOCOL_VERSION", "PendingTrap", "Program", "RunResult",
     "NoisyOracle", "ScriptedOracle", "SnapshotError", "State", "Status", "TracingOracle",
     "TrapFrame", "__version__", "assemble", "assemble_file", "crc16", "dump",

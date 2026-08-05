@@ -29,6 +29,7 @@ MODULES = [
     "protocol.py",
     "assembler.py",
     "oracle.py",
+    "llm.py",
     "machine.py",
     "snapshot.py",
     "cli.py",
