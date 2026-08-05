@@ -22,8 +22,10 @@
 > ```
 >
 > It lives in [`trapcpu/`](trapcpu/) alongside the original and reuses the base
-> ISA unchanged. The wire format is specified in
-> [`docs/TRAP_PROTOCOL.md`](docs/TRAP_PROTOCOL.md).
+> ISA unchanged. The model can run asynchronously (interrupts hide its
+> latency) and can even hand back **machine code** that a W^X memory system
+> and a verify-then-bless pipeline let the CPU run safely. The wire format is
+> specified in [`docs/TRAP_PROTOCOL.md`](docs/TRAP_PROTOCOL.md).
 >
 > ```console
 > $ python3 -m trapcpu run programs/trap/oracle_guess.asm --oracle bisect --seed 4

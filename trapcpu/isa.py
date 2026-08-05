@@ -22,8 +22,15 @@ PORT_KEY = 0x00        # read: pop a keycode off the input queue (0 if empty)
 PORT_KEY_STATE = 0x01  # read: 1 if a keycode is queued
 PORT_SCREEN = 0x10     # write: plot chr(A) at (B, C)
 PORT_RANDOM = 0x20     # read: uniform byte
-PORT_ORACLE = 0x30     # write: latch A as the oracle request descriptor pointer
+PORT_ORACLE = 0x30     # write: latch A as the oracle request descriptor pointer.
+                       # Ports 0x30-0x37 all latch; the low three bits select
+                       # the DEVICE the frame is addressed to (0x30 = device 0).
+PORT_ORACLE_END = 0x37
 PORT_ORACLE_STAT = 0x31  # read: status of the most recent completed trap
+PORT_IVEC = 0x38       # write: interrupt vector address; read: async channel
+                       # state (0 idle, 1 in flight, 2 completed awaiting IRQ)
+PORT_MPROT = 0x39      # write: A = (page << 8) | flag; flag 1 marks the 256
+                       # byte RAM page executable (and therefore unwritable)
 
 # ---------------------------------------------------------------------------
 # OPCODES
@@ -109,6 +116,16 @@ OPS = {
 
     "OUTS": 0x37,   # emit the NUL terminated string at RAM[B] to the console
     "CMPC": 0x38,   # flags from A - C, A unchanged
+
+    # --- phase 3: interrupts and executable RAM ---------------------------
+    "TRAPA": 0x39,  # asynchronous trap: publish the request and keep running;
+                    # completion arrives as an interrupt
+    "WFI": 0x3A,    # wait for interrupt (parks the machine if none can come)
+    "CLI": 0x3B,    # mask interrupts
+    "STI": 0x3C,    # unmask interrupts
+    "IRET": 0x3D,   # return from interrupt: pops PC then CS, unmasks
+    "CALLX": 0x3E,  # call executable RAM: pushes CS then PC, fetches from RAM
+    "RETX": 0x3F,   # return from CALLX: pops PC then CS
 }
 
 # Mnemonics that carry a one byte operand.
@@ -119,7 +136,7 @@ ARG16_OPS = frozenset({
     "LDIA", "LDIB", "LDIC", "LDID",
     "STA", "LDA",
     "JMP", "JZ", "JNZ",
-    "CALL",
+    "CALL", "CALLX",
     "JN", "JNN", "JC", "JNC",
 })
 

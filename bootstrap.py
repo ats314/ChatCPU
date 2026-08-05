@@ -57,8 +57,15 @@ PORT_KEY = 0x00        # read: pop a keycode off the input queue (0 if empty)
 PORT_KEY_STATE = 0x01  # read: 1 if a keycode is queued
 PORT_SCREEN = 0x10     # write: plot chr(A) at (B, C)
 PORT_RANDOM = 0x20     # read: uniform byte
-PORT_ORACLE = 0x30     # write: latch A as the oracle request descriptor pointer
+PORT_ORACLE = 0x30     # write: latch A as the oracle request descriptor pointer.
+                       # Ports 0x30-0x37 all latch; the low three bits select
+                       # the DEVICE the frame is addressed to (0x30 = device 0).
+PORT_ORACLE_END = 0x37
 PORT_ORACLE_STAT = 0x31  # read: status of the most recent completed trap
+PORT_IVEC = 0x38       # write: interrupt vector address; read: async channel
+                       # state (0 idle, 1 in flight, 2 completed awaiting IRQ)
+PORT_MPROT = 0x39      # write: A = (page << 8) | flag; flag 1 marks the 256
+                       # byte RAM page executable (and therefore unwritable)
 
 # ---------------------------------------------------------------------------
 # OPCODES
@@ -144,6 +151,16 @@ OPS = {
 
     "OUTS": 0x37,   # emit the NUL terminated string at RAM[B] to the console
     "CMPC": 0x38,   # flags from A - C, A unchanged
+
+    # --- phase 3: interrupts and executable RAM ---------------------------
+    "TRAPA": 0x39,  # asynchronous trap: publish the request and keep running;
+                    # completion arrives as an interrupt
+    "WFI": 0x3A,    # wait for interrupt (parks the machine if none can come)
+    "CLI": 0x3B,    # mask interrupts
+    "STI": 0x3C,    # unmask interrupts
+    "IRET": 0x3D,   # return from interrupt: pops PC then CS, unmasks
+    "CALLX": 0x3E,  # call executable RAM: pushes CS then PC, fetches from RAM
+    "RETX": 0x3F,   # return from CALLX: pops PC then CS
 }
 
 # Mnemonics that carry a one byte operand.
@@ -154,7 +171,7 @@ ARG16_OPS = frozenset({
     "LDIA", "LDIB", "LDIC", "LDID",
     "STA", "LDA",
     "JMP", "JZ", "JNZ",
-    "CALL",
+    "CALL", "CALLX",
     "JN", "JNN", "JC", "JNC",
 })
 
@@ -258,6 +275,10 @@ class Status:
     RETRIES = 0x21         # attempts exhausted
     BUDGET = 0x22          # oracle call budget exhausted
     ABORT = 0x23           # host aborted the trap
+
+    BUSY = 0x24            # TRAP/TRAPA while an async request is in flight
+    WX = 0x25              # writeback denied: response buffer overlaps an
+                           # executable page (the IOMMU rule)
 
 
 STATUS_NAMES = {
@@ -418,7 +439,8 @@ class TrapFrame:
 
     def __init__(self, nonce, prompt, mode=Mode.TEXT, replicas=1, capacity=64,
                  attempt=1, retries=0, flags=0, registers=None, cycle=0,
-                 descriptor=0, last_status=None, last_detail=None):
+                 descriptor=0, last_status=None, last_detail=None,
+                 channel="SYNC", device=0):
         self.nonce = nonce & 0xFFFF
         self.prompt = prompt
         self.mode = mode
@@ -432,6 +454,8 @@ class TrapFrame:
         self.descriptor = descriptor
         self.last_status = last_status
         self.last_detail = last_detail
+        self.channel = channel
+        self.device = device
 
     @property
     def nonce_text(self):
@@ -451,6 +475,10 @@ class TrapFrame:
         lines.append(f"MAXLEN: {self.capacity}")
         lines.append(f"CYCLE: {self.cycle}")
         lines.append(f"DESC: {self.descriptor:04X}")
+        if self.channel != "SYNC":
+            lines.append(f"CHANNEL: {self.channel}")
+        if self.device:
+            lines.append(f"DEVICE: {self.device}")
 
         if self.registers:
             lines.append("REGS: " + " ".join(
@@ -2038,6 +2066,63 @@ class BisectOracle(Oracle):
         )
 
 
+class NavigatorOracle(Oracle):
+    """Steers toward a target by reading coordinates out of the prompt.
+
+    The counterpart of :class:`BisectOracle` for the async pilot demo: the
+    guest publishes "ship at (x,y) ... target at (tx,ty)" and keeps flying
+    while this backend decides. Directions are the pilot program's encoding:
+    1 up, 2 down, 3 left, 4 right.
+    """
+
+    name = "navigator"
+
+    _COORDS = re.compile(
+        r"ship at \((\d+),(\d+)\).*?target at \((\d+),(\d+)\)", re.I | re.S
+    )
+
+    def ask(self, frame):
+        match = self._COORDS.search(frame.prompt)
+        if not match:
+            return render_reply(frame.nonce, [], status="REFUSED")
+        x, y, tx, ty = (int(match.group(i)) for i in range(1, 5))
+
+        # Close the larger gap first; ties break horizontal.
+        if abs(tx - x) >= abs(ty - y) and tx != x:
+            direction = 4 if tx > x else 3
+        elif ty != y:
+            direction = 2 if ty > y else 1
+        else:
+            direction = 4  # already there; the guest will notice before we do
+
+        return render_reply(
+            frame.nonce, [str(direction)] * frame.replicas,
+            checksum="crc", replicas=frame.replicas,
+        )
+
+
+class MuxOracle(Oracle):
+    """Route each frame to a backend by its DEVICE number.
+
+    Ports 0x30-0x37 select devices 0-7, so a guest can put a fast cheap
+    model on one port and a strong slow one on another and choose per
+    question - big.LITTLE for intelligence. Frames for devices with no
+    backend attached get no reply, which completes the trap with RETRIES:
+    an empty slot on the bus reads as a device that never answers.
+    """
+
+    name = "mux"
+
+    def __init__(self, devices):
+        self.devices = dict(devices)
+
+    def ask(self, frame):
+        backend = self.devices.get(getattr(frame, "device", 0))
+        if backend is None:
+            return None
+        return backend.ask(frame)
+
+
 # ---------------------------------------------------------------------------
 # FAULT INJECTION
 # ---------------------------------------------------------------------------
@@ -2287,8 +2372,8 @@ class TracingOracle(Oracle):
 
 __all__ = [
     "Oracle", "OracleExhausted", "ManualOracle", "CallbackOracle",
-    "ScriptedOracle", "EchoOracle", "BisectOracle", "NoisyOracle", "Fault",
-    "ALL_FAULTS",
+    "ScriptedOracle", "EchoOracle", "BisectOracle", "NoisyOracle",
+    "NavigatorOracle", "MuxOracle", "Fault", "ALL_FAULTS",
     "FaultInjector", "TracingOracle",
 ]
 
@@ -2592,6 +2677,7 @@ class State:
     READY = "READY"
     RUNNING = "RUNNING"
     TRAPPED = "TRAPPED"
+    ASYNC = "ASYNC"
     HALTED = "HALTED"
     LIMIT = "LIMIT"
     FAULT = "FAULT"
@@ -2603,6 +2689,11 @@ class CPUFault(Exception):
 
 class _Suspend(Exception):
     """Internal control flow. Unwinds the run loop at a trap."""
+
+
+class _AsyncPublish(Exception):
+    """Internal control flow. Surfaces an async frame; the machine stays
+    runnable — the whole point of TRAPA is that execution continues."""
 
 
 class MachineError(Exception):
@@ -2698,11 +2789,13 @@ class PendingTrap:
 
     __slots__ = (
         "descriptor", "mode", "replicas", "capacity", "retries", "flags",
-        "response", "prompt", "attempt", "nonce", "history",
+        "response", "prompt", "attempt", "nonce", "history", "channel",
+        "device",
     )
 
     def __init__(self, descriptor, mode, replicas, capacity, retries, flags,
-                 response, prompt, attempt=1, nonce=0, history=None):
+                 response, prompt, attempt=1, nonce=0, history=None,
+                 channel="SYNC", device=0):
         self.descriptor = descriptor
         self.mode = mode
         self.replicas = replicas
@@ -2714,6 +2807,8 @@ class PendingTrap:
         self.attempt = attempt
         self.nonce = nonce
         self.history = history if history is not None else []
+        self.channel = channel
+        self.device = device
 
     def to_frame(self, machine):
         last_status = self.history[-1][0] if self.history else None
@@ -2732,6 +2827,8 @@ class PendingTrap:
             descriptor=self.descriptor,
             last_status=last_status,
             last_detail=last_detail,
+            channel=self.channel,
+            device=self.device,
         )
 
 
@@ -2778,6 +2875,15 @@ class Hardware:
             return self.rng.randrange(0, 256)
         if port == PORT_ORACLE_STAT:
             return self.machine.last_oracle_status if self.machine else 0
+        if port == PORT_IVEC:
+            machine = self.machine
+            if machine is None:
+                return 0
+            if machine.async_pending is not None:
+                return 1
+            if machine.irq_pending:
+                return 2
+            return 0
         return 0
 
     def write_port(self, port, value):
@@ -2789,8 +2895,13 @@ class Hardware:
             x, y = machine.B, machine.C
             if 0 <= x < SCREEN_W and 0 <= y < SCREEN_H:
                 self.screen[y][x] = chr(machine.A & 0xFF)
-        elif port == PORT_ORACLE:
+        elif PORT_ORACLE <= port <= PORT_ORACLE_END:
             machine.oracle_ptr = value & 0xFFFF
+            machine.oracle_device = port - PORT_ORACLE
+        elif port == PORT_IVEC:
+            machine.ivec = value & 0xFFFF
+        elif port == PORT_MPROT:
+            machine.exec_map[(value >> 8) & 0xFF] = value & 1
 
 
 # ---------------------------------------------------------------------------
@@ -2829,12 +2940,20 @@ class Machine:
         self.output_buffer = []
 
         self.oracle_ptr = None
+        self.oracle_device = 0
         self.pending = None
+        self.async_pending = None
         self.last_oracle_status = Status.OK
         self.last_oracle_detail = ""
         self.last_oracle_notes = []
         self.traps_used = 0
         self.segment_limit = self.cycle_limit
+
+        self.cs = 0                       # 0: fetch from ROM, 1: from RAM
+        self.ivec = 0                     # interrupt vector
+        self.ien = 0                      # interrupts masked at reset
+        self.irq_pending = False
+        self.exec_map = bytearray(256)    # per 256-byte-page execute permission
 
         self.hardware.reset()
         self.stats.reset()
@@ -2872,7 +2991,13 @@ class Machine:
         return self.ram[address & 0xFFFF]
 
     def write8(self, address, value):
-        self.ram[address & 0xFFFF] = value & 0xFF
+        address &= 0xFFFF
+        if self.exec_map[address >> 8]:
+            raise CPUFault(
+                f"W^X fault: write to executable page {address >> 8:02X} "
+                f"(address {address:04X})"
+            )
+        self.ram[address] = value & 0xFF
 
     def read16(self, address):
         return self.read8(address) | (self.read8(address + 1) << 8)
@@ -2894,9 +3019,9 @@ class Machine:
 
     def push16(self, value):
         value &= 0xFFFF
-        self.ram[self.SP] = value & 0xFF
+        self.write8(self.SP, value)            # W^X applies to the stack too
         self.SP = (self.SP - 1) & 0xFFFF
-        self.ram[self.SP] = (value >> 8) & 0xFF
+        self.write8(self.SP, value >> 8)
         self.SP = (self.SP - 1) & 0xFFFF
 
     def pop16(self):
@@ -2923,7 +3048,15 @@ class Machine:
     # -- fetch -------------------------------------------------------------
 
     def fetch8(self):
-        value = self.rom[self.PC]
+        if self.cs:
+            if not self.exec_map[self.PC >> 8]:
+                raise CPUFault(
+                    f"NX fault: fetch from non-executable RAM page "
+                    f"{self.PC >> 8:02X} (PC {self.PC:04X})"
+                )
+            value = self.ram[self.PC]
+        else:
+            value = self.rom[self.PC]
         self.PC = (self.PC + 1) & 0xFFFF
         return value
 
@@ -2968,9 +3101,17 @@ class Machine:
                 return RunResult(State.LIMIT, reason=f"cycle budget {budget} spent",
                                  cycles=self.cycles - start, output=self.output())
             try:
+                if self.irq_pending and self.ien:
+                    self._deliver_irq()
                 self.step()
             except _Suspend:
                 return RunResult(State.TRAPPED, frame=self.pending.to_frame(self),
+                                 cycles=self.cycles - start, output=self.output())
+            except _AsyncPublish:
+                # The machine is still runnable; only the run loop unwinds so
+                # the host can see the frame. state stays RUNNING on purpose.
+                return RunResult(State.ASYNC,
+                                 frame=self.async_pending.to_frame(self),
                                  cycles=self.cycles - start, output=self.output())
             except CPUFault as error:
                 self.state = State.FAULT
@@ -2988,7 +3129,8 @@ class Machine:
     # -- oracle ------------------------------------------------------------
 
     def _next_nonce(self):
-        previous = self.pending.nonce if self.pending else None
+        source = self.async_pending or self.pending
+        previous = source.nonce if source else None
         for _ in range(16):
             nonce = self.rng.randrange(1, 0x10000)
             if nonce != previous:
@@ -3071,6 +3213,12 @@ class Machine:
         Otherwise A and the descriptor would disagree, which is precisely the
         kind of quiet inconsistency this machine exists to make impossible.
         """
+        if self.async_pending is not None or self.irq_pending:
+            # Single-channel device: a synchronous trap cannot overtake an
+            # asynchronous one that is still in flight or awaiting delivery.
+            self._complete(Status.BUSY, detail="async channel busy")
+            return
+
         pending, error, writable = self._read_descriptor()
         if pending is None:
             status = (
@@ -3088,6 +3236,8 @@ class Machine:
             )
             return
 
+        pending.device = self.oracle_device
+
         self.pending = pending
         pending.nonce = self._next_nonce()
         self.traps_used += 1
@@ -3095,39 +3245,123 @@ class Machine:
         self.state = State.TRAPPED
         raise _Suspend()
 
+    def _begin_async(self):
+        """Executed by TRAPA. Publishes the frame and keeps the CPU running.
+
+        Completion arrives later, as an interrupt: the reply is validated and
+        written back by :meth:`resume`, the IRQ line goes high, and the next
+        instruction boundary with interrupts enabled vectors through IVEC.
+        Registers are NOT clobbered by an async completion — the handler reads
+        the descriptor, which is what the descriptor is for.
+        """
+        if self.async_pending is not None or self.irq_pending:
+            self._complete(Status.BUSY, detail="async channel busy")
+            return
+
+        pending, error, writable = self._read_descriptor()
+        if pending is None:
+            status = (
+                Status.NO_REQUEST if self.oracle_ptr is None
+                else Status.BAD_DESCRIPTOR
+            )
+            self._complete(status, detail=error, descriptor=writable)
+            return
+
+        if self.traps_used >= self.oracle_budget:
+            self._complete(Status.BUDGET, detail="oracle budget exhausted",
+                           descriptor=pending.descriptor)
+            return
+
+        pending.channel = "ASYNC"
+        pending.device = self.oracle_device
+        pending.nonce = self._next_nonce()
+        self.async_pending = pending
+        self.traps_used += 1
+        self.stats.traps += 1
+        raise _AsyncPublish()
+
+    def _deliver_irq(self):
+        """Vector through IVEC: push CS then PC, mask, jump. IRET undoes it."""
+        self.push16(self.cs)
+        self.push16(self.PC)
+        self.cs = 0                      # handlers always run from ROM
+        self.PC = self.ivec
+        self.ien = 0                     # auto-mask until IRET
+        self.irq_pending = False
+
     def resume(self, reply_text):
-        """Feed the oracle's answer back in and continue, or retry."""
-        if self.state != State.TRAPPED or self.pending is None:
+        """Feed the oracle's answer back in and continue, or retry.
+
+        Serves both channels: a machine suspended on a synchronous TRAP (or
+        parked at WFI), and a machine still running with an async request in
+        flight. Async completions write the descriptor and raise the IRQ line
+        instead of clobbering registers.
+        """
+        if self.async_pending is not None:
+            pending = self.async_pending
+        elif self.state == State.TRAPPED and self.pending is not None:
+            pending = self.pending
+        else:
             raise MachineError("machine is not waiting on a trap")
 
-        pending = self.pending
+        return self._resume_pending(pending, reply_text)
+
+    def _resume_pending(self, pending, reply_text):
         frame = pending.to_frame(self)
         result = validate(reply_text, frame)
         self.stats.record_attempt(result.status)
 
-        if not result.ok:
+        if not result.ok and pending.attempt <= pending.retries:
             pending.history.append((result.status, result.detail))
-            if pending.attempt <= pending.retries:
-                pending.attempt += 1
-                pending.nonce = self._next_nonce()
-                self.stats.retried += 1
-                return RunResult(State.TRAPPED, frame=pending.to_frame(self),
-                                 cycles=0, output=self.output())
-            return self._finish_trap(result)
+            pending.attempt += 1
+            pending.nonce = self._next_nonce()
+            self.stats.retried += 1
+            state = (State.TRAPPED if self.state == State.TRAPPED
+                     else State.ASYNC)
+            return RunResult(state, frame=pending.to_frame(self),
+                             cycles=0, output=self.output())
 
+        if pending.channel == "ASYNC":
+            return self._finish_async(pending, result)
         return self._finish_trap(result)
 
     def fail_trap(self, status=Status.ABORT, detail=""):
         """Terminate the pending trap from the host side, without a reply."""
-        if self.state != State.TRAPPED or self.pending is None:
+        if self.async_pending is not None:
+            pending = self.async_pending
+        elif self.state == State.TRAPPED and self.pending is not None:
+            pending = self.pending
+        else:
             raise MachineError("machine is not waiting on a trap")
-        self.pending.history.append((status, detail))
+        pending.history.append((status, detail))
         self.stats.record_attempt(status)
+        if pending.channel == "ASYNC":
+            return self._finish_async(pending, OracleResult(status, detail=detail))
         return self._finish_trap(OracleResult(status, detail=detail))
+
+    def _wx_blocked(self, pending, result):
+        """The IOMMU rule: the oracle's DMA may never land on executable
+        pages. Checked at completion time, because the guest could have
+        blessed the buffer's page between issuing the trap and the reply
+        arriving — the write is what must be legal, not the request."""
+        if not (result.ok and result.payload):
+            return False
+        start = pending.response
+        end = start + min(len(result.payload), pending.capacity)
+        first, last = start >> 8, max(start, end - 1) >> 8
+        return any(self.exec_map[page] for page in range(first, last + 1))
 
     def _finish_trap(self, result):
         """Write the oracle's answer into RAM and let the program continue."""
         pending = self.pending
+
+        if self._wx_blocked(pending, result):
+            result = OracleResult(
+                Status.WX,
+                detail=f"response buffer {pending.response:04X} overlaps an "
+                       f"executable page; writeback denied",
+            )
+
         length = 0
         value = result.value
 
@@ -3175,6 +3409,54 @@ class Machine:
         self.state = State.RUNNING
         return self.run(self.segment_limit)
 
+    def _finish_async(self, pending, result):
+        """Complete an async trap: descriptor writeback + IRQ, registers
+        untouched. If the machine is parked at WFI it resumes; if it was
+        running free the host simply continues it."""
+        if self._wx_blocked(pending, result):
+            result = OracleResult(
+                Status.WX,
+                detail=f"response buffer {pending.response:04X} overlaps an "
+                       f"executable page; writeback denied",
+            )
+
+        length = 0
+        if result.ok and result.payload:
+            payload = result.payload[:pending.capacity]
+            self.ram[pending.response:pending.response + len(payload)] = payload
+            length = len(payload)
+            if (pending.mode == Mode.TEXT
+                    and not pending.flags & Flag.NO_NUL
+                    and length < pending.capacity):
+                self.ram[pending.response + length] = 0
+
+        self.stats.corrected += result.corrected
+        self.stats.discarded += result.discarded
+        if result.status == Status.OK:
+            self.stats.ok += 1
+        elif result.status == Status.DEGRADED:
+            self.stats.degraded += 1
+        else:
+            self.stats.failed += 1
+
+        self._writeback(
+            pending.descriptor, result.status, length, pending.nonce,
+            pending.attempt, result.corrected, result.value,
+        )
+
+        self.last_oracle_status = result.status
+        self.last_oracle_detail = result.detail
+        self.last_oracle_notes = list(result.notes)
+
+        self.async_pending = None
+        self.irq_pending = True
+
+        if self.state == State.TRAPPED and self.pending is pending:
+            # The guest was parked at WFI waiting for exactly this.
+            self.pending = None
+            self.state = State.RUNNING
+        return self.run(self.segment_limit)
+
     def _complete(self, status, detail="", descriptor=None, length=0):
         """Complete a trap inline, without ever suspending."""
         self.stats.traps += 1
@@ -3204,15 +3486,28 @@ class Machine:
 
     # -- convenience -------------------------------------------------------
 
-    def execute(self, oracle, limit=None, max_traps=None):
-        """Run to completion, letting ``oracle`` answer every trap."""
+    def execute(self, oracle, limit=None, max_traps=None, async_latency=0):
+        """Run to completion, letting ``oracle`` answer every trap.
+
+        ``async_latency`` simulates a slow device on the async channel: after
+        an async frame is published, the machine runs that many further
+        cycles before the reply is delivered — which is the entire point of
+        TRAPA, so the default of 0 (instant device) undersells it.
+        """
         result = self.run(limit)
         served = 0
-        while result.trapped:
+        while result.state in (State.TRAPPED, State.ASYNC):
             if max_traps is not None and served >= max_traps:
                 return self.fail_trap(Status.BUDGET, "host trap limit reached")
             reply = oracle.ask(result.frame)
             served += 1
+
+            if result.state == State.ASYNC and async_latency:
+                # The device is thinking; the machine keeps running.
+                interim = self.run(async_latency)
+                if interim.state in (State.HALTED, State.FAULT):
+                    return interim  # the guest finished without the answer
+
             if reply is None:
                 result = self.fail_trap(Status.RETRIES, "oracle produced no reply")
             else:
@@ -3232,6 +3527,9 @@ class Machine:
             f"CYCLES = {self.cycles}",
             f"ORACLE = {status_name(self.last_oracle_status)} "
             f"({self.traps_used}/{self.oracle_budget} traps used)",
+            f"CS = {'RAM' if self.cs else 'ROM'}   IVEC = {self.ivec:04X}   "
+            f"IEN = {self.ien}   IRQ = {int(self.irq_pending)}   "
+            f"ASYNC = {'in-flight' if self.async_pending else 'idle'}",
         ]
         if self.last_oracle_detail:
             lines.append(f"    detail: {self.last_oracle_detail}")
@@ -3528,6 +3826,54 @@ def _op_outs(m):
     m.output_buffer.append(text.decode("utf-8", "replace"))
 
 
+def _op_trapa(m):
+    m._begin_async()
+
+
+def _op_wfi(m):
+    """Wait for interrupt. Deadlock is a fault, not a hang: a WFI that no
+    event can ever satisfy is a guest bug and says so immediately."""
+    if m.irq_pending:
+        if not m.ien:
+            raise CPUFault("WFI with the pending interrupt masked (CLI deadlock)")
+        m._deliver_irq()
+        return
+    if m.async_pending is not None:
+        # Park until the reply arrives; resume() will deliver it and the
+        # IRQ fires at the next instruction boundary.
+        m.pending = m.async_pending
+        m.state = State.TRAPPED
+        raise _Suspend()
+    raise CPUFault("WFI with no interrupt source")
+
+
+def _op_cli(m):
+    m.ien = 0
+
+
+def _op_sti(m):
+    m.ien = 1
+
+
+def _op_iret(m):
+    m.PC = m.pop16()
+    m.cs = m.pop16() & 1
+    m.ien = 1
+
+
+def _op_callx(m):
+    address = m.fetch16()
+    m.push16(m.cs)
+    m.push16(m.PC)
+    m.cs = 1
+    m.PC = address
+
+
+def _op_retx(m):
+    m.PC = m.pop16()
+    m.cs = m.pop16() & 1
+
+
 _HANDLERS = {
     "NOP": _op_nop, "LDIA": _op_ldia, "LDIB": _op_ldib, "LDIC": _op_ldic,
     "LDID": _op_ldid, "ADD": _op_add, "SUB": _op_sub, "INC": _op_inc,
@@ -3543,7 +3889,8 @@ _HANDLERS = {
     "MOVCA": _op_movca, "MOVAD": _op_movad, "MOVDA": _op_movda, "JN": _op_jn,
     "JNN": _op_jnn, "JC": _op_jc, "JNC": _op_jnc, "MUL": _op_mul,
     "DIV": _op_div, "SHL": _op_shl, "SHR": _op_shr, "OUTS": _op_outs,
-    "CMPC": _op_cmpc,
+    "CMPC": _op_cmpc, "TRAPA": _op_trapa, "WFI": _op_wfi, "CLI": _op_cli,
+    "STI": _op_sti, "IRET": _op_iret, "CALLX": _op_callx, "RETX": _op_retx,
 }
 
 _DISPATCH = {OPS[name]: handler for name, handler in _HANDLERS.items()}
@@ -3596,6 +3943,7 @@ _SECTOR_RE = re.compile(r"^@([0-9A-Fa-f]{1,4})\s+([0-9A-Fa-f]+)\s+([0-9A-Fa-f]{4
 ROM_OPEN, ROM_CLOSE = "ROM>>>", "<<<ROM"
 RAM_OPEN, RAM_CLOSE = "RAM>>>", "<<<RAM"
 PROMPT_OPEN, PROMPT_CLOSE = "PENDINGPROMPT>>>", "<<<PENDINGPROMPT"
+APROMPT_OPEN, APROMPT_CLOSE = "ASYNCPROMPT>>>", "<<<ASYNCPROMPT"
 
 
 class SnapshotError(Exception):
@@ -3715,6 +4063,18 @@ def dump(machine, generation=None, name=None, include_rom=True):
     if machine.oracle_ptr is not None:
         body.append(f"ORACLEPTR: {machine.oracle_ptr:04X}")
 
+    body.append("IRQ: " + " ".join([
+        f"cs={machine.cs}",
+        f"ivec={machine.ivec:04X}",
+        f"ien={machine.ien}",
+        f"irq={int(machine.irq_pending)}",
+        f"dev={machine.oracle_device}",
+    ]))
+
+    exec_pages = [page for page in range(256) if machine.exec_map[page]]
+    if exec_pages:
+        body.append("EXECMAP: " + ",".join(f"{page:02X}" for page in exec_pages))
+
     pending = machine.pending
     if pending is not None:
         body.append("PENDING: " + " ".join([
@@ -3727,6 +4087,8 @@ def dump(machine, generation=None, name=None, include_rom=True):
             f"flags={pending.flags:04X}",
             f"desc={pending.descriptor:04X}",
             f"resp={pending.response:04X}",
+            f"chan={pending.channel}",
+            f"dev={pending.device}",
         ]))
         if pending.history:
             body.append("HISTORY: " + ",".join(
@@ -3735,6 +4097,24 @@ def dump(machine, generation=None, name=None, include_rom=True):
         body.append(PROMPT_OPEN)
         body.append(pending.prompt)
         body.append(PROMPT_CLOSE)
+
+    apending = machine.async_pending
+    if apending is not None and apending is not machine.pending:
+        body.append("APENDING: " + " ".join([
+            f"nonce={apending.nonce:04X}",
+            f"attempt={apending.attempt}",
+            f"retries={apending.retries}",
+            f"mode={apending.mode}",
+            f"replicas={apending.replicas}",
+            f"capacity={apending.capacity}",
+            f"flags={apending.flags:04X}",
+            f"desc={apending.descriptor:04X}",
+            f"resp={apending.response:04X}",
+            f"dev={apending.device}",
+        ]))
+        body.append(APROMPT_OPEN)
+        body.append(apending.prompt)
+        body.append(APROMPT_CLOSE)
 
     rom_sectors = list(_sectors(machine.rom)) if include_rom else []
     ram_sectors = list(_sectors(machine.ram))
@@ -3779,6 +4159,10 @@ class ParsedSnapshot:
         self.pending = None
         self.history = []
         self.prompt = None
+        self.irq = {}
+        self.execmap = []
+        self.apending = None
+        self.aprompt = None
         self.rom = []
         self.ram = []
         self.maps = {}
@@ -3842,18 +4226,22 @@ def _parse_snapshot(version, body):
         raw = body[cursor]
         stripped = raw.strip()
 
-        if stripped == PROMPT_OPEN:
+        if stripped in (PROMPT_OPEN, APROMPT_OPEN):
+            closer = PROMPT_CLOSE if stripped == PROMPT_OPEN else APROMPT_CLOSE
             canonical.append(raw)
             collected = []
             cursor += 1
-            while cursor < len(body) and body[cursor].strip() != PROMPT_CLOSE:
+            while cursor < len(body) and body[cursor].strip() != closer:
                 collected.append(body[cursor])
                 canonical.append(body[cursor])
                 cursor += 1
             if cursor < len(body):
                 canonical.append(body[cursor])
                 cursor += 1
-            snap.prompt = "\n".join(collected)
+            if stripped == PROMPT_OPEN:
+                snap.prompt = "\n".join(collected)
+            else:
+                snap.aprompt = "\n".join(collected)
             continue
 
         if stripped in (ROM_OPEN, RAM_OPEN):
@@ -3939,6 +4327,18 @@ def _read_header(snap, key, value):
                 snap.last_status = code
     elif key == "PENDING":
         snap.pending = _parse_kv(value)
+    elif key == "APENDING":
+        snap.apending = _parse_kv(value)
+    elif key == "IRQ":
+        snap.irq = _parse_kv(value)
+    elif key == "EXECMAP":
+        for token in value.split(","):
+            token = token.strip()
+            if token:
+                try:
+                    snap.execmap.append(int(token, 16))
+                except ValueError:
+                    pass
     elif key == "HISTORY":
         snap.history = [item for item in value.split(",") if item]
 
@@ -4075,6 +4475,17 @@ def mount(text, machine=None, seed=None):
     if oracle.get("budget"):
         machine.oracle_budget = _dec(oracle.get("budget"))
 
+    irq = snap.irq
+    machine.cs = _dec(irq.get("cs")) & 1
+    machine.ivec = _hex(irq.get("ivec"))
+    machine.ien = _dec(irq.get("ien")) & 1
+    machine.irq_pending = bool(_dec(irq.get("irq")))
+    machine.oracle_device = _dec(irq.get("dev"))
+
+    for page in snap.execmap:
+        if 0 <= page < 256:
+            machine.exec_map[page] = 1
+
     notes = []
     if snap.state == State.TRAPPED and snap.pending:
         pending = snap.pending
@@ -4090,7 +4501,13 @@ def mount(text, machine=None, seed=None):
             attempt=_dec(pending.get("attempt"), 1),
             nonce=_hex(pending.get("nonce")),
             history=[(Status.MALFORMED, name) for name in snap.history],
+            channel=pending.get("chan", "SYNC"),
+            device=_dec(pending.get("dev")),
         )
+        if machine.pending.channel == "ASYNC":
+            # Parked at WFI on the async channel: pending and async_pending
+            # are the same request, exactly as they were before the dump.
+            machine.async_pending = machine.pending
         machine.state = State.TRAPPED
         notes.append(
             f"resumed mid-trap: nonce {machine.pending.nonce:04X} "
@@ -4103,6 +4520,28 @@ def mount(text, machine=None, seed=None):
         if machine.state == State.TRAPPED:
             machine.state = State.FAULT
             notes.append("snapshot claimed TRAPPED but carried no pending request")
+
+    if snap.apending is not None:
+        apending = snap.apending
+        machine.async_pending = PendingTrap(
+            descriptor=_hex(apending.get("desc")),
+            mode=_dec(apending.get("mode")),
+            replicas=_dec(apending.get("replicas"), 1),
+            capacity=_dec(apending.get("capacity"), 1),
+            retries=_dec(apending.get("retries")),
+            flags=_hex(apending.get("flags")),
+            response=_hex(apending.get("resp")),
+            prompt=snap.aprompt or "",
+            attempt=_dec(apending.get("attempt"), 1),
+            nonce=_hex(apending.get("nonce")),
+            channel="ASYNC",
+            device=_dec(apending.get("dev")),
+        )
+        notes.append(
+            f"async request in flight: nonce {machine.async_pending.nonce:04X}"
+        )
+        if not snap.aprompt:
+            notes.append("async prompt was lost; a retry will ask nothing")
 
     bad = list(snap.bad_sectors) + _missing_sectors(snap)
 
@@ -4229,12 +4668,14 @@ itself: ``mount`` scans any text for the newest snapshot it can still read.
 ORACLE_HELP = """\
 echo      deterministic; answers from a [hint: ...] marker in the prompt
 bisect    plays higher/lower against oracle_guess.asm
+navigator steers the async pilot demo toward its target
 noisy[:R] unreliable memory: perturbs each replica with probability R
 manual    print the frame, read the reply from stdin (the real thing)
 claude[:MODEL]  a real Claude model over the Anthropic API (needs
           ANTHROPIC_API_KEY; default model claude-opus-5)
 script:F  replay answers from file F, one per line
-none      never answers; every trap completes with RETRIES\
+none      never answers; every trap completes with RETRIES
+A,B,...   comma list: device 0 gets A, device 1 gets B (ports 0x30, 0x31...)\
 """
 
 
@@ -4249,6 +4690,13 @@ def build_oracle(spec, faults=(), seed=None):
     """Turn a ``--oracle`` string into a backend, wrapped in fault injection."""
     import random
 
+    if "," in spec:
+        parts = [item.strip() for item in spec.split(",") if item.strip()]
+        return MuxOracle({
+            device: build_oracle(part, faults, seed)
+            for device, part in enumerate(parts)
+        })
+
     if spec.startswith("script:"):
         path = spec.split(":", 1)[1]
         with open(path, "r", encoding="utf-8") as handle:
@@ -4258,6 +4706,8 @@ def build_oracle(spec, faults=(), seed=None):
         inner = EchoOracle()
     elif spec == "bisect":
         inner = BisectOracle()
+    elif spec == "navigator":
+        inner = NavigatorOracle()
     elif spec == "noisy" or spec.startswith("noisy:"):
         rate = float(spec.split(":", 1)[1]) if ":" in spec else 0.3
         inner = NoisyOracle(rate=rate, rng=random.Random(seed))
@@ -4334,7 +4784,8 @@ def cmd_run(args, out):
         oracle = TracingOracle(oracle, sink=handle)
 
     try:
-        result = machine.execute(oracle, limit=args.limit)
+        result = machine.execute(oracle, limit=args.limit,
+                                 async_latency=args.latency)
     except OracleExhausted as error:
         out.write(f"oracle exhausted: {error}\n")
         return 1
@@ -4553,6 +5004,9 @@ def build_parser():
     run.add_argument("program")
     run.add_argument("--snapshot", help="write a snapshot frame here when done")
     run.add_argument("--trace", help="write every exchange here ('-' for stdout)")
+    run.add_argument("--latency", type=int, default=0,
+                     help="cycles the machine keeps running while an async "
+                          "(TRAPA) request is being answered")
     add_machine_flags(run)
     run.set_defaults(handler=cmd_run)
 
@@ -4665,7 +5119,7 @@ def boot():
     print("  TRAPCPU 1.0.0 - the model is on the motherboard")
     print("=" * 60)
     print()
-    print("CPU        : 16-bit, 57 opcodes")
+    print("CPU        : 16-bit, 64 opcodes")
     print("RAM / ROM  : 64 KiB each")
     print("ORACLE     : port 0x30, protocol TRAP/1")
     print("PERSISTENCE: the conversation (dump / mount)")

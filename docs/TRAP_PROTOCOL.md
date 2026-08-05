@@ -517,3 +517,133 @@ An implementation speaks TRAP/1 if:
 Points 8 and 9 are the ones that are easy to get wrong and hard to notice: both
 are cases where the tidy-looking behaviour (always write something back) is the
 one that silently corrupts guest memory.
+
+---
+
+## 11. Extensions: the oracle as a bus device (protocol v1.1)
+
+Everything above treats the oracle as a *polled* device: `TRAP` stops the CPU
+dead and waits. That is honest but pessimistic — a peripheral that takes twenty
+seconds to answer should not freeze a machine that has other work to do, and a
+device that can only be *read* is weaker than one that can be *trusted to
+write*. Three extensions, each mapping a real hardware idea onto the stochastic
+peripheral. They are additive: a v1 oracle and a v1 program still work
+unchanged.
+
+### 11.1 The asynchronous channel — interrupts
+
+`TRAPA` publishes the same request frame as `TRAP` but does **not** suspend.
+The frame carries a `CHANNEL: ASYNC` header; the machine keeps executing, and
+completion is delivered as an **interrupt** rather than as clobbered registers.
+
+```
+TRAPA ──▶ publish frame (CHANNEL: ASYNC), keep running
+             │
+   ...CPU does other work while the oracle thinks...
+             │
+   reply validated ──▶ descriptor written back ──▶ IRQ line raised
+             │
+   next instruction boundary with interrupts enabled:
+   push CS, push PC, mask, jump to IVEC ──▶ handler ──▶ IRET
+```
+
+* The completion writes **only the descriptor**, never the live register file.
+  A handler that wants the answer reads it from the descriptor — that is what
+  the descriptor's OUT fields are for. This is the rule that makes async safe:
+  an interrupt that arrived between two instructions must not change what those
+  instructions compute.
+* `WFI` parks the machine if there is nothing else to do, and — critically — a
+  `WFI` that no pending, unmasked interrupt can ever satisfy is a **fault**, not
+  a hang. A stochastic peripheral that never answers must not be able to wedge
+  the CPU silently.
+* The channel is **single-depth**: a `TRAP` or `TRAPA` issued while a request is
+  in flight completes immediately with `BUSY` (0x24). One slow device, one
+  outstanding request; the guest serialises or waits.
+* Ports `0x30`–`0x37` are all latch ports; the low three bits are a **device
+  number**, carried as a `DEVICE: n` frame header. A fast cheap model on one
+  port and a strong slow one on another is big.LITTLE for intelligence — the
+  guest picks the coprocessor per question.
+
+The measurable claim: with a device latency of *L* cycles, a synchronous `TRAP`
+spends all *L* frozen; `TRAPA` spends them executing. `oracle_async.asm` prints
+the hidden work directly.
+
+### 11.2 Executable RAM and W^X — the oracle as a JIT
+
+The boldest extension. In BYTES mode the oracle can return **machine code**, and
+`CALLX` will execute it out of RAM. A language model becomes a JIT compiler —
+one that hallucinates — so the architecture borrows the two protections built
+for exactly that risk.
+
+**W^X (write-xor-execute).** Every 256-byte RAM page is either writable or
+executable, never both, tracked in an execute map and toggled by `PORT_MPROT`.
+The instant a page is blessed executable it becomes unwritable, atomically, in
+the same operation. Fetching from a non-executable page is an **NX fault**;
+writing to an executable page is a **W^X fault**. Neither is recoverable — they
+are guest bugs, and they say so.
+
+**The IOMMU rule.** The oracle's writeback is DMA, and a hallucinating DMA
+device must never be allowed to land bytes on a page the CPU will execute. A
+completion whose response buffer overlaps *any* executable page is denied with
+`WX` (0x25) and **nothing is written** — checked at completion time, because the
+guest may bless a page between issuing the trap and the reply arriving. It is
+the write that must be legal, not the request.
+
+**Verify-then-bless.** These protections bound *damage*; they do not establish
+*trust*. The honest pipeline, demonstrated in `oracle_jit.asm`, is two
+independent layers:
+
+1. **Static verification.** The returned bytes land in a writable scratch page.
+   A linear-sweep verifier checks every opcode against an **allowlist** of
+   one-byte, register-only instructions — arithmetic, logic, register moves, and
+   the `RETX` terminator. No memory writes, no I/O, no jumps, no traps. A
+   routine built only from these is a pure function of the register file: it can
+   compute from A/B/C/D and return, and it *cannot* escape, persist, or loop.
+   Anything else is rejected before a single byte becomes executable. This is
+   exactly what eBPF and WASM validators do — restrict the code to a subset you
+   can prove safe by inspection, rather than trying to prove arbitrary code
+   safe.
+2. **Property testing.** Static verification catches *unsafe* code; it says
+   nothing about *correct* code. A routine that computes `2*A` when `3*A` was
+   asked passes every structural check. So the guest, after blessing, runs the
+   routine on a known test vector inside its sandbox and checks the answer in
+   hardware before trusting it. The two layers are orthogonal and both
+   necessary: the first stops the code from hurting you, the second stops you
+   from believing it.
+
+The framing question this answers: *what does W^X look like when your JIT is a
+language model?* It looks like a verifier that assumes every routine is
+adversarial, a memory system that will not let generated bytes become
+executable by accident, and a caller that trusts nothing it has not tested.
+
+### 11.3 New status codes and opcodes
+
+| Code | Name | Meaning |
+| ---: | --- | --- |
+| `0x24` | `BUSY` | a trap was issued while the async channel was occupied |
+| `0x25` | `WX` | writeback denied: the response buffer overlaps an executable page |
+
+| Opcode | Mnemonic | Effect |
+| ---: | --- | --- |
+| `0x39` | `TRAPA` | asynchronous trap; publish and keep running |
+| `0x3A` | `WFI` | wait for interrupt (fault if none can arrive) |
+| `0x3B` / `0x3C` | `CLI` / `STI` | mask / unmask interrupts |
+| `0x3D` | `IRET` | return from interrupt (pop PC, pop CS, unmask) |
+| `0x3E` / `0x3F` | `CALLX` / `RETX` | call into / return from executable RAM |
+
+Ports: `0x38` `PORT_IVEC` (interrupt vector / async channel state), `0x39`
+`PORT_MPROT` (`A = (page << 8) | exec_flag`).
+
+### 11.4 What v1.1 still does not defend against
+
+The v1 gaps (§9.1) all stand. Two more, specific to these extensions:
+
+* **A correct-looking routine that is wrong on untested inputs.** The property
+  test checks the vectors the guest chose; a routine that passes them and fails
+  elsewhere is undetected. This is the halting-problem wall that every JIT
+  hits — verification proves safety, not correctness, and correctness testing
+  is only ever as good as its vectors.
+* **Interrupt storms and priority.** The channel is single-depth and the IRQ is
+  a single line with no priority levels. A design that multiplexed many devices
+  would need arbitration this deliberately omits — the honesty here is in the
+  small ISA, not in pretending to be an APIC.

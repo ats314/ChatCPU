@@ -31,6 +31,8 @@ from .oracle import (
     EchoOracle,
     FaultInjector,
     ManualOracle,
+    MuxOracle,
+    NavigatorOracle,
     NoisyOracle,
     Oracle,
     OracleExhausted,
@@ -42,12 +44,14 @@ from .snapshot import SnapshotError, dump, mount
 ORACLE_HELP = """\
 echo      deterministic; answers from a [hint: ...] marker in the prompt
 bisect    plays higher/lower against oracle_guess.asm
+navigator steers the async pilot demo toward its target
 noisy[:R] unreliable memory: perturbs each replica with probability R
 manual    print the frame, read the reply from stdin (the real thing)
 claude[:MODEL]  a real Claude model over the Anthropic API (needs
           ANTHROPIC_API_KEY; default model claude-opus-5)
 script:F  replay answers from file F, one per line
-none      never answers; every trap completes with RETRIES\
+none      never answers; every trap completes with RETRIES
+A,B,...   comma list: device 0 gets A, device 1 gets B (ports 0x30, 0x31...)\
 """
 
 
@@ -62,6 +66,13 @@ def build_oracle(spec, faults=(), seed=None):
     """Turn a ``--oracle`` string into a backend, wrapped in fault injection."""
     import random
 
+    if "," in spec:
+        parts = [item.strip() for item in spec.split(",") if item.strip()]
+        return MuxOracle({
+            device: build_oracle(part, faults, seed)
+            for device, part in enumerate(parts)
+        })
+
     if spec.startswith("script:"):
         path = spec.split(":", 1)[1]
         with open(path, "r", encoding="utf-8") as handle:
@@ -71,6 +82,8 @@ def build_oracle(spec, faults=(), seed=None):
         inner = EchoOracle()
     elif spec == "bisect":
         inner = BisectOracle()
+    elif spec == "navigator":
+        inner = NavigatorOracle()
     elif spec == "noisy" or spec.startswith("noisy:"):
         rate = float(spec.split(":", 1)[1]) if ":" in spec else 0.3
         inner = NoisyOracle(rate=rate, rng=random.Random(seed))
@@ -147,7 +160,8 @@ def cmd_run(args, out):
         oracle = TracingOracle(oracle, sink=handle)
 
     try:
-        result = machine.execute(oracle, limit=args.limit)
+        result = machine.execute(oracle, limit=args.limit,
+                                 async_latency=args.latency)
     except OracleExhausted as error:
         out.write(f"oracle exhausted: {error}\n")
         return 1
@@ -366,6 +380,9 @@ def build_parser():
     run.add_argument("program")
     run.add_argument("--snapshot", help="write a snapshot frame here when done")
     run.add_argument("--trace", help="write every exchange here ('-' for stdout)")
+    run.add_argument("--latency", type=int, default=0,
+                     help="cycles the machine keeps running while an async "
+                          "(TRAPA) request is being answered")
     add_machine_flags(run)
     run.set_defaults(handler=cmd_run)
 

@@ -12,6 +12,8 @@
 .EQU PORT_RANDOM,     0x20
 .EQU PORT_ORACLE,     0x30
 .EQU PORT_ORACLE_STAT, 0x31
+.EQU PORT_IVEC,       0x38
+.EQU PORT_MPROT,      0x39
 
 ; --- descriptor ------------------------------------------------------------
 .EQU ORACLE_MAGIC,    0x524F          ; 'O','R'
@@ -64,3 +66,8 @@
 .EQU ST_RETRIES,        0x21
 .EQU ST_BUDGET,         0x22
 .EQU ST_ABORT,          0x23
+.EQU ST_BUSY,           0x24
+.EQU ST_WX,             0x25
+
+; --- memory protection ------------------------------------------------------
+.EQU PAGE_EXEC,       0x0001          ; flag bit for OUTP PORT_MPROT

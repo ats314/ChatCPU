@@ -297,6 +297,63 @@ class BisectOracle(Oracle):
         )
 
 
+class NavigatorOracle(Oracle):
+    """Steers toward a target by reading coordinates out of the prompt.
+
+    The counterpart of :class:`BisectOracle` for the async pilot demo: the
+    guest publishes "ship at (x,y) ... target at (tx,ty)" and keeps flying
+    while this backend decides. Directions are the pilot program's encoding:
+    1 up, 2 down, 3 left, 4 right.
+    """
+
+    name = "navigator"
+
+    _COORDS = re.compile(
+        r"ship at \((\d+),(\d+)\).*?target at \((\d+),(\d+)\)", re.I | re.S
+    )
+
+    def ask(self, frame):
+        match = self._COORDS.search(frame.prompt)
+        if not match:
+            return render_reply(frame.nonce, [], status="REFUSED")
+        x, y, tx, ty = (int(match.group(i)) for i in range(1, 5))
+
+        # Close the larger gap first; ties break horizontal.
+        if abs(tx - x) >= abs(ty - y) and tx != x:
+            direction = 4 if tx > x else 3
+        elif ty != y:
+            direction = 2 if ty > y else 1
+        else:
+            direction = 4  # already there; the guest will notice before we do
+
+        return render_reply(
+            frame.nonce, [str(direction)] * frame.replicas,
+            checksum="crc", replicas=frame.replicas,
+        )
+
+
+class MuxOracle(Oracle):
+    """Route each frame to a backend by its DEVICE number.
+
+    Ports 0x30-0x37 select devices 0-7, so a guest can put a fast cheap
+    model on one port and a strong slow one on another and choose per
+    question - big.LITTLE for intelligence. Frames for devices with no
+    backend attached get no reply, which completes the trap with RETRIES:
+    an empty slot on the bus reads as a device that never answers.
+    """
+
+    name = "mux"
+
+    def __init__(self, devices):
+        self.devices = dict(devices)
+
+    def ask(self, frame):
+        backend = self.devices.get(getattr(frame, "device", 0))
+        if backend is None:
+            return None
+        return backend.ask(frame)
+
+
 # ---------------------------------------------------------------------------
 # FAULT INJECTION
 # ---------------------------------------------------------------------------
@@ -546,7 +603,7 @@ class TracingOracle(Oracle):
 
 __all__ = [
     "Oracle", "OracleExhausted", "ManualOracle", "CallbackOracle",
-    "ScriptedOracle", "EchoOracle", "BisectOracle", "NoisyOracle", "Fault",
-    "ALL_FAULTS",
+    "ScriptedOracle", "EchoOracle", "BisectOracle", "NoisyOracle",
+    "NavigatorOracle", "MuxOracle", "Fault", "ALL_FAULTS",
     "FaultInjector", "TracingOracle",
 ]

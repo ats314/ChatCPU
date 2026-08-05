@@ -39,6 +39,7 @@ _SECTOR_RE = re.compile(r"^@([0-9A-Fa-f]{1,4})\s+([0-9A-Fa-f]+)\s+([0-9A-Fa-f]{4
 ROM_OPEN, ROM_CLOSE = "ROM>>>", "<<<ROM"
 RAM_OPEN, RAM_CLOSE = "RAM>>>", "<<<RAM"
 PROMPT_OPEN, PROMPT_CLOSE = "PENDINGPROMPT>>>", "<<<PENDINGPROMPT"
+APROMPT_OPEN, APROMPT_CLOSE = "ASYNCPROMPT>>>", "<<<ASYNCPROMPT"
 
 
 class SnapshotError(Exception):
@@ -158,6 +159,18 @@ def dump(machine, generation=None, name=None, include_rom=True):
     if machine.oracle_ptr is not None:
         body.append(f"ORACLEPTR: {machine.oracle_ptr:04X}")
 
+    body.append("IRQ: " + " ".join([
+        f"cs={machine.cs}",
+        f"ivec={machine.ivec:04X}",
+        f"ien={machine.ien}",
+        f"irq={int(machine.irq_pending)}",
+        f"dev={machine.oracle_device}",
+    ]))
+
+    exec_pages = [page for page in range(256) if machine.exec_map[page]]
+    if exec_pages:
+        body.append("EXECMAP: " + ",".join(f"{page:02X}" for page in exec_pages))
+
     pending = machine.pending
     if pending is not None:
         body.append("PENDING: " + " ".join([
@@ -170,6 +183,8 @@ def dump(machine, generation=None, name=None, include_rom=True):
             f"flags={pending.flags:04X}",
             f"desc={pending.descriptor:04X}",
             f"resp={pending.response:04X}",
+            f"chan={pending.channel}",
+            f"dev={pending.device}",
         ]))
         if pending.history:
             body.append("HISTORY: " + ",".join(
@@ -178,6 +193,24 @@ def dump(machine, generation=None, name=None, include_rom=True):
         body.append(PROMPT_OPEN)
         body.append(pending.prompt)
         body.append(PROMPT_CLOSE)
+
+    apending = machine.async_pending
+    if apending is not None and apending is not machine.pending:
+        body.append("APENDING: " + " ".join([
+            f"nonce={apending.nonce:04X}",
+            f"attempt={apending.attempt}",
+            f"retries={apending.retries}",
+            f"mode={apending.mode}",
+            f"replicas={apending.replicas}",
+            f"capacity={apending.capacity}",
+            f"flags={apending.flags:04X}",
+            f"desc={apending.descriptor:04X}",
+            f"resp={apending.response:04X}",
+            f"dev={apending.device}",
+        ]))
+        body.append(APROMPT_OPEN)
+        body.append(apending.prompt)
+        body.append(APROMPT_CLOSE)
 
     rom_sectors = list(_sectors(machine.rom)) if include_rom else []
     ram_sectors = list(_sectors(machine.ram))
@@ -222,6 +255,10 @@ class ParsedSnapshot:
         self.pending = None
         self.history = []
         self.prompt = None
+        self.irq = {}
+        self.execmap = []
+        self.apending = None
+        self.aprompt = None
         self.rom = []
         self.ram = []
         self.maps = {}
@@ -285,18 +322,22 @@ def _parse_snapshot(version, body):
         raw = body[cursor]
         stripped = raw.strip()
 
-        if stripped == PROMPT_OPEN:
+        if stripped in (PROMPT_OPEN, APROMPT_OPEN):
+            closer = PROMPT_CLOSE if stripped == PROMPT_OPEN else APROMPT_CLOSE
             canonical.append(raw)
             collected = []
             cursor += 1
-            while cursor < len(body) and body[cursor].strip() != PROMPT_CLOSE:
+            while cursor < len(body) and body[cursor].strip() != closer:
                 collected.append(body[cursor])
                 canonical.append(body[cursor])
                 cursor += 1
             if cursor < len(body):
                 canonical.append(body[cursor])
                 cursor += 1
-            snap.prompt = "\n".join(collected)
+            if stripped == PROMPT_OPEN:
+                snap.prompt = "\n".join(collected)
+            else:
+                snap.aprompt = "\n".join(collected)
             continue
 
         if stripped in (ROM_OPEN, RAM_OPEN):
@@ -382,6 +423,18 @@ def _read_header(snap, key, value):
                 snap.last_status = code
     elif key == "PENDING":
         snap.pending = _parse_kv(value)
+    elif key == "APENDING":
+        snap.apending = _parse_kv(value)
+    elif key == "IRQ":
+        snap.irq = _parse_kv(value)
+    elif key == "EXECMAP":
+        for token in value.split(","):
+            token = token.strip()
+            if token:
+                try:
+                    snap.execmap.append(int(token, 16))
+                except ValueError:
+                    pass
     elif key == "HISTORY":
         snap.history = [item for item in value.split(",") if item]
 
@@ -518,6 +571,17 @@ def mount(text, machine=None, seed=None):
     if oracle.get("budget"):
         machine.oracle_budget = _dec(oracle.get("budget"))
 
+    irq = snap.irq
+    machine.cs = _dec(irq.get("cs")) & 1
+    machine.ivec = _hex(irq.get("ivec"))
+    machine.ien = _dec(irq.get("ien")) & 1
+    machine.irq_pending = bool(_dec(irq.get("irq")))
+    machine.oracle_device = _dec(irq.get("dev"))
+
+    for page in snap.execmap:
+        if 0 <= page < 256:
+            machine.exec_map[page] = 1
+
     notes = []
     if snap.state == State.TRAPPED and snap.pending:
         pending = snap.pending
@@ -533,7 +597,13 @@ def mount(text, machine=None, seed=None):
             attempt=_dec(pending.get("attempt"), 1),
             nonce=_hex(pending.get("nonce")),
             history=[(Status.MALFORMED, name) for name in snap.history],
+            channel=pending.get("chan", "SYNC"),
+            device=_dec(pending.get("dev")),
         )
+        if machine.pending.channel == "ASYNC":
+            # Parked at WFI on the async channel: pending and async_pending
+            # are the same request, exactly as they were before the dump.
+            machine.async_pending = machine.pending
         machine.state = State.TRAPPED
         notes.append(
             f"resumed mid-trap: nonce {machine.pending.nonce:04X} "
@@ -546,6 +616,28 @@ def mount(text, machine=None, seed=None):
         if machine.state == State.TRAPPED:
             machine.state = State.FAULT
             notes.append("snapshot claimed TRAPPED but carried no pending request")
+
+    if snap.apending is not None:
+        apending = snap.apending
+        machine.async_pending = PendingTrap(
+            descriptor=_hex(apending.get("desc")),
+            mode=_dec(apending.get("mode")),
+            replicas=_dec(apending.get("replicas"), 1),
+            capacity=_dec(apending.get("capacity"), 1),
+            retries=_dec(apending.get("retries")),
+            flags=_hex(apending.get("flags")),
+            response=_hex(apending.get("resp")),
+            prompt=snap.aprompt or "",
+            attempt=_dec(apending.get("attempt"), 1),
+            nonce=_hex(apending.get("nonce")),
+            channel="ASYNC",
+            device=_dec(apending.get("dev")),
+        )
+        notes.append(
+            f"async request in flight: nonce {machine.async_pending.nonce:04X}"
+        )
+        if not snap.aprompt:
+            notes.append("async prompt was lost; a retry will ask nothing")
 
     bad = list(snap.bad_sectors) + _missing_sectors(snap)
 
