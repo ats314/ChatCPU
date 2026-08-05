@@ -52,6 +52,24 @@
 > and a verify-then-bless pipeline let the CPU run safely. The wire format is
 > specified in [`docs/TRAP_PROTOCOL.md`](docs/TRAP_PROTOCOL.md).
 >
+> Because everything except the model call is deterministic, you can then ask
+> which of those judgements actually mattered:
+>
+> ```console
+> $ python3 -m trapcpu ablate programs/trap/oracle_sort.asm
+> CRITICALITY   load bearing : 4/16    no effect : 12/16
+> SELF CORRECTION
+>     first   3 random  100%  ############################
+>     first   8 random   57%  #################
+>     first  15 random    0%
+> ```
+>
+> Twelve of the sixteen model calls can be individually corrupted and the output
+> does not move. The first three can be literal coin flips. Bubble sort revisits
+> its own decisions on every pass, so early mistakes get repaired — **the
+> algorithm is error correction for the model**, and only the final pass is
+> exposed. Details and prior art in [`docs/ABLATION.md`](docs/ABLATION.md).
+>
 > Swap `--oracle judge` (a hardcoded stand-in, so it runs with no API key) for
 > `--oracle claude` and the ordering is decided for real, one question at a
 > time. `--oracle manual` prints each question and lets you answer it yourself.
