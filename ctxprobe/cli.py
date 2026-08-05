@@ -126,6 +126,32 @@ def cmd_demo(args):
     return 0
 
 
+def cmd_study(args):
+    from .study import DEFAULT_ADAPTERS, render_table, run_study, to_csv, to_json
+
+    records = run_study(
+        adapters=args.adapters or DEFAULT_ADAPTERS,
+        trials=args.trials,
+        probes=args.probes,
+        sectors=args.sectors,
+        seed=args.seed,
+        log=(None if args.json else
+             lambda line: print("  " + line, file=sys.stderr)),
+    )
+    if args.csv:
+        with open(args.csv, "w", encoding="utf-8") as handle:
+            handle.write(to_csv(records) + "\n")
+        print("wrote %s" % args.csv, file=sys.stderr)
+    if args.json:
+        print(to_json(records, indent=2))
+    else:
+        print("CTXPROBE STUDY seed=%d trials=%d probes=%dx%d sectors "
+              "(mean %% of sentinel bytes intact, by context depth)"
+              % (args.seed, args.trials, args.probes, args.sectors))
+        print(render_table(records, args.probes))
+    return 0
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="ctxprobe",
@@ -175,6 +201,27 @@ def build_parser():
     rot_cmd.add_argument("--seed", type=int, default=0,
                          help="fault RNG seed (default 0)")
     rot_cmd.set_defaults(func=cmd_rot)
+
+    study_cmd = commands.add_parser(
+        "study", help="measure survival curves across compaction adapters")
+    study_cmd.add_argument(
+        "--adapters", default=None,
+        help="comma-separated adapter specs: identity, truncate:F, dedup, "
+             "reflow, wear, cmd:SHELL, claude[:MODEL] "
+             "(default: identity,truncate:0.5,dedup,reflow,wear)")
+    study_cmd.add_argument("--trials", type=int, default=3,
+                           help="transcripts per adapter (default 3)")
+    study_cmd.add_argument("--probes", type=int, default=4,
+                           help="probes per transcript (default 4)")
+    study_cmd.add_argument("--sectors", type=int, default=12,
+                           help="sectors per probe (default 12)")
+    study_cmd.add_argument("--seed", type=int, default=0,
+                           help="study seed (default 0)")
+    study_cmd.add_argument("--json", action="store_true",
+                           help="emit raw records as JSON")
+    study_cmd.add_argument("--csv", default=None, metavar="FILE",
+                           help="also write per-record CSV to FILE")
+    study_cmd.set_defaults(func=cmd_study)
 
     demo_cmd = commands.add_parser(
         "demo", help="run the full emit/wear/scan loop on synthetic text")

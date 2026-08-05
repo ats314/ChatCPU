@@ -132,6 +132,58 @@ $ python3 -m ctxprobe rot transcript.txt --strip-headers    # "summarization"
 `rot` is also the rehearsal tool: before trusting state to a medium, wear a
 copy down and check the scan says what you'd need it to say.
 
+## The study rig: survival curves across compactors
+
+`ctxprobe study` is the experiment the instrument exists for. It builds
+synthetic conversations with probes salted at intervals, runs them through
+*adapters* — anything that maps transcript text to smaller transcript text —
+and renders the result as a survival curve over context depth, per adapter:
+
+```console
+$ python3 -m ctxprobe study --seed 7 --trials 3
+CTXPROBE STUDY seed=7 trials=3 probes=4x12 sectors (mean % of sentinel bytes intact, by context depth)
+adapter        p0(old)        p1        p2   p3(new)  vanished
+identity          100%      100%      100%      100%  0/12
+truncate:0.5        0%        0%        0%      100%  9/12
+dedup             100%        0%        0%        0%  9/12
+reflow              0%        0%        0%        0%  0/12
+wear               78%       86%       72%       81%  0/12
+```
+
+Four compaction strategies, four distinct failure signatures — which is the
+whole argument for sector-level taxonomy over a loss percentage:
+
+* **Truncation** is the classic depth curve: the oldest probes vanish
+  wholesale (caught only by the PREV chain), the newest survives untouched.
+* **Dedup** is the inverse, and was discovered *by* the instrument: the
+  oldest probe survives and every later one vanishes, because frame
+  boilerplate repeats verbatim and line-dedup eats the later frames'
+  structure. "Smart" dedup compaction is catastrophic for structured content.
+  There is a test preserving this finding.
+* **Reflow** (72-column re-wrapping — what naive text processing does)
+  destroys 100% of the data with **zero** vanished probes: every frame is
+  still found, every sector is mangled in place. Damage and eviction are
+  different failures, and the report keeps them apart.
+* **Wear** (the fault simulators combined) shows partial degradation at
+  every depth.
+
+Adapters are open-ended: `cmd:SHELL` pipes the transcript through any
+external compactor (stdin → stdout), and `claude[:MODEL]` has a real model do
+the compaction over raw stdlib HTTPS — the actual cross-model experiment.
+The model is asked to "compact this transcript, keep what matters," with no
+hint about the probes; whether sentinel data reads as worth keeping to a
+summarizer is precisely the measurement. Set `ANTHROPIC_API_KEY` and run:
+
+```console
+$ python3 -m ctxprobe study --adapters identity,claude --trials 3
+$ python3 -m ctxprobe study --adapters claude:claude-opus-5,claude:claude-haiku-4-5 --csv curves.csv
+```
+
+Server-side refusal fallbacks are enabled on the API calls by default, so a
+safety-classifier decline re-runs on a fallback model instead of failing the
+trial. Every study is deterministic given `--seed`; `--json` and `--csv`
+emit per-record data for charting.
+
 ## Library use
 
 ```python
