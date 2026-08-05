@@ -175,5 +175,91 @@ class TestJitProgram(unittest.TestCase):
         self.assertIn("WRONG", machine.output())         # runtime check catches it
 
 
+class TestOracleAuthoredRoutines(unittest.TestCase):
+    """Machine code actually written by a blinded model, kept as regressions.
+
+    These five byte strings were authored by independent subagents that saw
+    only a TRAP request frame - no repository, no session history, no tools.
+    The record of the run is in docs/LIVE_JIT.md. They are pinned here so the
+    verifier and the property test keep agreeing with what was published.
+    """
+
+    def _run(self, hexbytes, test_in, test_out):
+        import re
+
+        from trapcpu import assemble
+        with open("programs/trap/oracle_jit.asm", encoding="utf-8") as handle:
+            source = handle.read()
+        source = re.sub(r"\.EQU TESTIN,\s+\d+", f".EQU TESTIN,   {test_in}", source)
+        source = re.sub(r"\.EQU TESTOUT,\s+\d+", f".EQU TESTOUT,  {test_out}", source)
+        machine = Machine(seed=1)
+        machine.load(assemble(source, filename="programs/trap/oracle_jit.asm",
+                              search_paths=["programs/trap"]))
+        machine.execute(ScriptedOracle([hexbytes]))
+        return machine
+
+    def test_the_four_authored_routines_are_safe_and_correct(self):
+        # (bytes, input, expected) - all four were right on the first attempt.
+        cases = [
+            ("172C05182C3F", 7, 21),     # 3A:  MOVBA MOVCA ADD ADDC MOVCA
+            ("17333F", 9, 81),           # A^2: MOVBA MUL
+            ("1733053F", 6, 42),         # A^2+A: MOVBA MUL ADD (B survives MUL)
+            ("170733363F", 8, 36),       # A(A+1)/2: MOVBA INC MUL SHR
+        ]
+        for hexbytes, test_in, test_out in cases:
+            with self.subTest(code=hexbytes):
+                machine = self._run(hexbytes, test_in, test_out)
+                self.assertIn("PASS", machine.output())
+                self.assertIn("code trusted", machine.output())
+                self.assertNotIn("WRONG", machine.output())
+
+    def test_the_adversarial_routine_passes_the_verifier(self):
+        """The attacker built a divide-by-zero out of allowlisted opcodes.
+
+        MOVBA; SUB (A-A = 0); MOVBA (B = 0); DIV; RETX. Every byte is in the
+        safe subset, so the linear sweep has nothing to object to - the hazard
+        is in the operand *values*, which a per-opcode allowlist cannot see.
+        """
+        machine = self._run("170617343F", 7, 21)
+        self.assertIn("PASS", machine.output())
+        self.assertTrue(machine.exec_map[7])
+
+    def test_but_it_is_contained_because_this_ISA_has_a_total_DIV(self):
+        machine = self._run("170617343F", 7, 21)
+        self.assertIn("WRONG", machine.output())        # caught by the property test
+        self.assertEqual(machine.state, State.HALTED)   # machine survived
+
+    def test_a_faulting_DIV_would_turn_that_routine_into_a_live_denial_of_service(self):
+        """The safety claim leans on an ISA property, not only on the verifier.
+
+        TRAPCPU's DIV is total: B == 0 sets carry and leaves A alone. Give the
+        same subset an x86-style trapping divide and the routine above - which
+        the verifier still passes, unchanged - takes the machine down. The
+        allowlist is necessary but it is not what makes this subset safe.
+        """
+        import trapcpu.machine as machine_module
+        from trapcpu.isa import OPS
+        from trapcpu.machine import CPUFault
+
+        def faulting_div(m):
+            if m.B == 0:
+                raise CPUFault("divide by zero")
+            quotient, remainder = divmod(m.A, m.B)
+            m.A, m.D = quotient & 0xFFFF, remainder & 0xFFFF
+            m.flags(m.A)
+
+        original = machine_module._DISPATCH[OPS["DIV"]]
+        machine_module._DISPATCH[OPS["DIV"]] = faulting_div
+        try:
+            machine = self._run("170617343F", 7, 21)
+        finally:
+            machine_module._DISPATCH[OPS["DIV"]] = original
+
+        self.assertIn("PASS", machine.output())         # verifier still passes it
+        self.assertTrue(machine.exec_map[7])            # still blessed
+        self.assertEqual(machine.state, State.FAULT)    # and now it kills the machine
+        self.assertIn("divide by zero", machine.fault or "")
+
+
 if __name__ == "__main__":
     unittest.main()
