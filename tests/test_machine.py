@@ -1,6 +1,6 @@
 import unittest
 
-from trapcpu import Machine, MachineError, State, assemble
+from trapcpu import Machine, MachineError, State, assemble, assemble_file
 from trapcpu.oracle import EchoOracle, Fault, FaultInjector, ScriptedOracle
 from trapcpu.protocol import (
     DESCRIPTOR_SIZE,
@@ -371,3 +371,73 @@ class TestSegmentLimit(unittest.TestCase):
         machine.execute(EchoOracle(), limit=200)
         self.assertEqual(machine.state, State.LIMIT)
         self.assertLess(machine.cycles, 500)
+
+
+class TestTrapRegisterABI(unittest.TestCase):
+    """TRAP returns through B, C and D as well as A.
+
+    Discovered the hard way: oracle_sort.asm held a loop index in C across a
+    trap, and the trap overwrote it with the attempt count. Nothing faulted -
+    the sort just silently produced a corrupted list. These tests pin the
+    contract so the clobber is a documented ABI rather than a trap for the
+    next caller.
+    """
+
+    SRC = """
+.INCLUDE "trap.inc"
+.DATA
+.ORG 0x0300
+REQ:  .DW ORACLE_MAGIC
+      .DB ORACLE_VERSION
+      .DB MODE_NUM
+      .DW P
+      .DW ANS
+      .DW 8
+      .DB 1
+      .DB 2
+      .DW 0
+      .DW 0
+      .DW 0
+      .DB 0
+      .DB 0
+      .DW 0
+      .DW 0
+P:    .ASCIIZ "pick a number [hint: 137]"
+ANS:  .RESB 8
+.CODE
+      LDIB 0xBBBB
+      LDIC 0xCCCC
+      LDID 0xDDDD
+      LDIA REQ
+      OUTP PORT_ORACLE
+      TRAP
+      HLT
+"""
+
+    def _run(self):
+        import os
+        import tempfile
+        from trapcpu.cli import build_oracle
+        directory = os.path.join(os.getcwd(), "programs", "trap")
+        handle = tempfile.NamedTemporaryFile("w", suffix=".asm", dir=directory,
+                                             delete=False)
+        try:
+            handle.write(self.SRC)
+            handle.close()
+            machine = Machine(seed=1)
+            machine.load(assemble_file(handle.name))
+            machine.execute(build_oracle("echo"))
+            return machine
+        finally:
+            os.unlink(handle.name)
+
+    def test_the_parsed_value_arrives_in_d(self):
+        self.assertEqual(self._run().D, 137)
+
+    def test_b_and_c_are_clobbered_not_preserved(self):
+        """The surprising half of the contract, stated as a test."""
+        machine = self._run()
+        self.assertNotEqual(machine.B, 0xBBBB)
+        self.assertNotEqual(machine.C, 0xCCCC)
+        self.assertEqual(machine.A, 0)          # ST_OK
+        self.assertEqual(machine.C, 1)          # attempts, not the caller's C

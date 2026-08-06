@@ -79,7 +79,6 @@ J:      .DW 0                   ; inner loop counter
 K:      .DW 0                   ; printing cursor
 PA:     .DW 0                   ; left item under comparison
 PB:     .DW 0                   ; right item
-SLOT:   .DW 0                   ; &ITEMS[J]
 NCMP:   .DW 0                   ; comparisons made
 
 BANNER: .ASCIIZ "TRAPCPU: sorting by judgement, least dangerous first\n\n"
@@ -107,19 +106,13 @@ OUTER:
         LDIA 0
         STA  J
 INNER:
-        LDA  J                  ; SLOT = &ITEMS[J]
-        CALL SLOTADR
-        STA  SLOT
-
-        MOVBA                   ; PA = ITEMS[J]
-        LDW
+        LDIB ITEMS              ; B = array base, C = element index
+        LDA  J
+        MOVCA
+        LDWX                    ; PA = ITEMS[J]
         STA  PA
-
-        LDA  SLOT               ; PB = ITEMS[J+1]
-        INC
-        INC
-        MOVBA
-        LDW
+        INCC
+        LDWX                    ; PB = ITEMS[J+1]
         STA  PB
 
         CALL ASKPAIR            ; A = 1 or 2, straight from the oracle
@@ -128,16 +121,15 @@ INNER:
         CMP                     ; which puts it out of order for an ascending
         JNZ  NOSWAP             ; sort, so swap it down
 
-        LDA  SLOT
-        MOVBA
-        LDA  PB
-        STW                     ; ITEMS[J]   = PB
-        LDA  SLOT
+        LDIB ITEMS              ; TRAP clobbers B/C/D, so rebuild the index
+        LDA  J                  ; rather than assume C survived ASKPAIR
         INC
-        INC
-        MOVBA
+        MOVCA                   ; C = J+1
         LDA  PA
-        STW                     ; ITEMS[J+1] = PA
+        STWX                    ; ITEMS[J+1] = PA
+        DECC
+        LDA  PB
+        STWX                    ; ITEMS[J]   = PB
 NOSWAP:
         LDA  J
         INC
@@ -164,16 +156,6 @@ NOSWAP:
         LDIB TAIL
         OUTS
         HLT
-
-; --- SLOTADR: A = index -> A = &ITEMS[index] -------------------------------
-SLOTADR:
-        MOVBA                   ; B = index
-        LDIA 2
-        MUL                     ; A = index * 2
-        MOVBA
-        LDIA ITEMS
-        ADD                     ; A = ITEMS + index*2
-        RET
 
 ; --- ASKPAIR: compare [PA] and [PB] via the coprocessor ---------------------
 ; Builds the prompt by concatenation, hands the descriptor to the device, and
@@ -219,10 +201,10 @@ PRINTLIST:
 PLOOP:
         LDIB INDENT
         OUTS
+        LDIB ITEMS
         LDA  K
-        CALL SLOTADR
-        MOVBA
-        LDW                     ; A = ITEMS[K], a pointer
+        MOVCA
+        LDWX                    ; A = ITEMS[K], a pointer
         MOVBA
         OUTS
         LDIB NL

@@ -126,6 +126,15 @@ OPS = {
     "IRET": 0x3D,   # return from interrupt: pops PC then CS, unmasks
     "CALLX": 0x3E,  # call executable RAM: pushes CS then PC, fetches from RAM
     "RETX": 0x3F,   # return from CALLX: pops PC then CS
+
+    # --- phase 4: indexed addressing --------------------------------------
+    # B is the base of an array, C is an element index. The scale is the
+    # element width, so C counts elements rather than bytes and the caller
+    # never open codes a multiply.
+    "LDWX": 0x40,   # A        <- RAM16[B + C*2]
+    "STWX": 0x41,   # RAM16[B + C*2] <- A
+    "LDBX": 0x42,   # A        <- RAM8[B + C]     (zero extended)
+    "STBX": 0x43,   # RAM8[B + C]    <- A & 0xFF
 }
 
 # Mnemonics that carry a one byte operand.

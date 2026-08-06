@@ -161,6 +161,15 @@ OPS = {
     "IRET": 0x3D,   # return from interrupt: pops PC then CS, unmasks
     "CALLX": 0x3E,  # call executable RAM: pushes CS then PC, fetches from RAM
     "RETX": 0x3F,   # return from CALLX: pops PC then CS
+
+    # --- phase 4: indexed addressing --------------------------------------
+    # B is the base of an array, C is an element index. The scale is the
+    # element width, so C counts elements rather than bytes and the caller
+    # never open codes a multiply.
+    "LDWX": 0x40,   # A        <- RAM16[B + C*2]
+    "STWX": 0x41,   # RAM16[B + C*2] <- A
+    "LDBX": 0x42,   # A        <- RAM8[B + C]     (zero extended)
+    "STBX": 0x43,   # RAM8[B + C]    <- A & 0xFF
 }
 
 # Mnemonics that carry a one byte operand.
@@ -3444,6 +3453,10 @@ class Machine:
             pending.attempt, result.corrected, value,
         )
 
+        # TRAP returns through the register file as well as the descriptor:
+        # A = status, B = length, C = attempts, D = the parsed value. That is
+        # the ABI programs use, so B/C/D are CALLER SAVED across a trap - a
+        # caller holding a loop index in C must reload it afterwards.
         self.A = result.status
         self.B = length
         self.C = pending.attempt
@@ -3514,7 +3527,7 @@ class Machine:
         self.stats.failed += 1
         if descriptor is not None and descriptor + DESCRIPTOR_SIZE <= RAM_SIZE:
             self._writeback(descriptor, status, length, 0, 0, 0, None)
-        self.A = status
+        self.A = status                 # same caller saved ABI as _resolve
         self.B = length
         self.C = 0
         self.flags(self.A)
@@ -3783,6 +3796,24 @@ def _op_ldw(m):
     m.flags(m.A)
 
 
+def _op_ldwx(m):
+    m.A = m.read16((m.B + m.C * 2) & 0xFFFF)
+    m.flags(m.A)
+
+
+def _op_stwx(m):
+    m.write16((m.B + m.C * 2) & 0xFFFF, m.A)
+
+
+def _op_ldbx(m):
+    m.A = m.read8((m.B + m.C) & 0xFFFF)
+    m.flags(m.A)
+
+
+def _op_stbx(m):
+    m.write8((m.B + m.C) & 0xFFFF, m.A)
+
+
 def _op_incb(m):
     m.B = (m.B + 1) & 0xFFFF
 
@@ -3941,6 +3972,7 @@ _HANDLERS = {
     "DIV": _op_div, "SHL": _op_shl, "SHR": _op_shr, "OUTS": _op_outs,
     "CMPC": _op_cmpc, "TRAPA": _op_trapa, "WFI": _op_wfi, "CLI": _op_cli,
     "STI": _op_sti, "IRET": _op_iret, "CALLX": _op_callx, "RETX": _op_retx,
+    "LDWX": _op_ldwx, "STWX": _op_stwx, "LDBX": _op_ldbx, "STBX": _op_stbx,
 }
 
 _DISPATCH = {OPS[name]: handler for name, handler in _HANDLERS.items()}
@@ -5193,7 +5225,7 @@ def boot():
     print("  TRAPCPU 1.0.0 - the model is on the motherboard")
     print("=" * 60)
     print()
-    print("CPU        : 16-bit, 64 opcodes")
+    print("CPU        : 16-bit, 68 opcodes")
     print("RAM / ROM  : 64 KiB each")
     print("ORACLE     : port 0x30, protocol TRAP/1")
     print("PERSISTENCE: the conversation (dump / mount)")
