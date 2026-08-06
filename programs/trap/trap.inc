@@ -36,6 +36,16 @@
 .EQU F_FLAGS,         0x14
 .EQU F_VALUE,         0x16
 
+; --- register ABI across TRAP ----------------------------------------------
+; A trap returns through registers as well as the descriptor:
+;
+;   A = status    B = response length    C = attempts    D = parsed value
+;
+; So B, C and D are CALLER SAVED. A loop holding an index in C must reload it
+; after the trap; assuming otherwise silently corrupts data rather than
+; faulting. The same values are always available in the descriptor at
+; F_STATUS / F_LENGTH / F_ATTEMPTS / F_VALUE.
+
 ; --- modes -----------------------------------------------------------------
 .EQU MODE_TEXT,       0
 .EQU MODE_NUM,        1
